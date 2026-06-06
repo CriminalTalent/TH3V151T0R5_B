@@ -4,16 +4,28 @@ require 'googleauth'
 require 'json'
 
 class SheetManager
+  # 스탯 시트 열 구조
+  # A: ID, B: 이름, C: HP, D: 체력, E: 공격력, F: 방어력, G: 속도, H: 기술, I: 행운, J: 행동력
+
+  STAT_COLS = {
+    "HP"   => "C",
+    "체력"  => "D",
+    "공격력" => "E",
+    "방어력" => "F",
+    "속도"  => "G",
+    "기술"  => "H",
+    "행운"  => "I",
+    "행동력" => "J"
+  }.freeze
+
+  STAT_RANGE = "'스탯'!A2:J1000".freeze
+
   def initialize
-    @spreadsheet_id = ENV['GOOGLE_SHEET_ID']
+    @spreadsheet_id   = ENV['GOOGLE_SHEET_ID']
     @credentials_path = ENV['GOOGLE_CREDENTIALS_PATH'] || 'credentials.json'
-    
-    # Google Sheets API 초기화
-    @sheets_service = Google::Apis::SheetsV4::SheetsService.new
+    @sheets_service   = Google::Apis::SheetsV4::SheetsService.new
     @sheets_service.authorization = authorize
-    
     @mutex = Mutex.new
-    
     puts "[SheetManager] 초기화 완료"
   end
 
@@ -31,180 +43,125 @@ class SheetManager
 
   public
 
-  # 사용자 검색 (ID로 검색, 스탯 + 사용자 시트 통합)
   def find_user(user_id)
     @mutex.synchronize do
       begin
-        # 스탯 시트에서 기본 정보
-        stats_range = "'스탯'!A2:H1000"
-        stats_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, stats_range)
-        stats_values = stats_response.values
-        
+        stats_values = @sheets_service.get_spreadsheet_values(@spreadsheet_id, STAT_RANGE).values
         return nil unless stats_values
-        
+
         stats_row = stats_values.find { |row| row[0] == user_id }
         return nil unless stats_row
-        
-        # 사용자 시트에서 아이템 정보
-        user_range = "'사용자'!A2:D1000"
-        user_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, user_range)
-        user_values = user_response.values
-        
-        user_row = user_values&.find { |row| row[0] == user_id }
-        
-        return {
-          "ID" => stats_row[0],                         # A열: ID
-          "이름" => stats_row[1] || user_id,            # B열: 이름
-          "HP" => (stats_row[2] || "100").to_i,         # C열: 현재 체력
-          "공격" => (stats_row[3] || "10").to_i,        # D열: 공격
-          "방어" => (stats_row[4] || "10").to_i,        # E열: 방어
-          "민첩성" => (stats_row[5] || "10").to_i,      # F열: 민첩
-          "행운" => (stats_row[6] || "10").to_i,        # G열: 행운
-          "체력" => (stats_row[7] || "10").to_i,        # H열: 체력 (최대HP용)
-          "갈레온" => user_row ? (user_row[2] || "0").to_i : 0,     # 사용자 C열
-          "아이템" => user_row ? (user_row[3] || "") : ""            # 사용자 D열
+
+        user_range  = "'사용자'!A2:F1000"
+        user_values = @sheets_service.get_spreadsheet_values(@spreadsheet_id, user_range).values
+        user_row    = user_values&.find { |row| row[0] == user_id }
+
+        {
+          "ID"   => stats_row[0],
+          "이름" => stats_row[1] || user_id,
+          "HP"   => (stats_row[2] || "500").to_i,   # C
+          "체력"  => (stats_row[3] || "50").to_i,    # D
+          "공격력" => (stats_row[4] || "10").to_i,   # E
+          "방어력" => (stats_row[5] || "10").to_i,   # F
+          "속도"  => (stats_row[6] || "0").to_i,     # G
+          "기술"  => (stats_row[7] || "0").to_i,     # H
+          "행운"  => (stats_row[8] || "5").to_i,     # I
+          "행동력" => (stats_row[9] || "5").to_i,    # J
+          "갈레온" => user_row ? (user_row[2] || "0").to_i : 0,
+          "아이템" => user_row ? (user_row[3] || "") : "",
+          "기숙사" => user_row ? (user_row[5] || "") : ""
         }
       rescue => e
         puts "[SheetManager] 사용자 검색 오류: #{e.message}"
-        puts e.backtrace[0..3]
         nil
       end
     end
   end
 
-  # 사용자 정보 업데이트
   def update_user(user_id, updates)
     @mutex.synchronize do
       begin
-        success = true
-        
-        # 스탯 시트 업데이트
+        stats_values = @sheets_service.get_spreadsheet_values(@spreadsheet_id, STAT_RANGE).values
+        return false unless stats_values
+
+        row_index = stats_values.find_index { |row| row[0] == user_id }
+        return false unless row_index
+
+        actual_row    = row_index + 2
         stats_updates = {}
-        user_updates = {}
-        
+        user_updates  = {}
+
         updates.each do |key, value|
-          case key
-          when "HP", "현재체력"
-            stats_updates["C"] = value
-          when "공격"
-            stats_updates["D"] = value
-          when "방어"
-            stats_updates["E"] = value
-          when "민첩성", "민첩"
-            stats_updates["F"] = value
-          when "행운"
-            stats_updates["G"] = value
-          when "체력"
-            stats_updates["H"] = value
-          when "갈레온"
+          col = STAT_COLS[key.to_s]
+          if col
+            stats_updates[col] = value
+          elsif key.to_s == "갈레온"
             user_updates["C"] = value
-          when "아이템"
+          elsif key.to_s == "아이템"
             user_updates["D"] = value
           end
         end
-        
-        # 스탯 시트 업데이트
-        if stats_updates.any?
-          stats_range = "'스탯'!A2:H1000"
-          stats_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, stats_range)
-          stats_values = stats_response.values
-          
-          if stats_values
-            row_index = stats_values.find_index { |row| row[0] == user_id }
-            
-            if row_index
-              actual_row = row_index + 2
-              
-              stats_updates.each do |col, value|
-                cell_range = "'스탯'!#{col}#{actual_row}"
-                value_range = Google::Apis::SheetsV4::ValueRange.new(values: [[value]])
-                
-                @sheets_service.update_spreadsheet_value(
-                  @spreadsheet_id,
-                  cell_range,
-                  value_range,
-                  value_input_option: 'USER_ENTERED'
-                )
-                
-                puts "[SheetManager] #{user_id}의 스탯 업데이트: #{col}열 = #{value}"
-              end
-            else
-              success = false
-            end
-          end
+
+        stats_updates.each do |col, value|
+          vr = Google::Apis::SheetsV4::ValueRange.new(values: [[value]])
+          @sheets_service.update_spreadsheet_value(
+            @spreadsheet_id, "'스탯'!#{col}#{actual_row}", vr,
+            value_input_option: 'USER_ENTERED'
+          )
         end
-        
-        # 사용자 시트 업데이트
+
         if user_updates.any?
-          user_range = "'사용자'!A2:D1000"
-          user_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, user_range)
-          user_values = user_response.values
-          
+          user_values = @sheets_service.get_spreadsheet_values(@spreadsheet_id, "'사용자'!A2:F1000").values
           if user_values
-            row_index = user_values.find_index { |row| row[0] == user_id }
-            
-            if row_index
-              actual_row = row_index + 2
-              
+            u_idx = user_values.find_index { |row| row[0] == user_id }
+            if u_idx
+              u_row = u_idx + 2
               user_updates.each do |col, value|
-                cell_range = "'사용자'!#{col}#{actual_row}"
-                value_range = Google::Apis::SheetsV4::ValueRange.new(values: [[value]])
-                
+                vr = Google::Apis::SheetsV4::ValueRange.new(values: [[value]])
                 @sheets_service.update_spreadsheet_value(
-                  @spreadsheet_id,
-                  cell_range,
-                  value_range,
+                  @spreadsheet_id, "'사용자'!#{col}#{u_row}", vr,
                   value_input_option: 'USER_ENTERED'
                 )
-                
-                puts "[SheetManager] #{user_id}의 사용자 정보 업데이트: #{col}열 = #{value}"
               end
-            else
-              success = false
             end
           end
         end
-        
-        success
+
+        true
       rescue => e
-        puts "[SheetManager] 사용자 업데이트 오류: #{e.message}"
-        puts e.backtrace[0..3]
+        puts "[SheetManager] 업데이트 오류: #{e.message}"
         false
       end
     end
   end
 
-  # 모든 사용자 목록 가져오기
-  def list_users
+  def all_users
     @mutex.synchronize do
       begin
-        stats_range = "'스탯'!A2:H1000"
-        stats_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, stats_range)
-        stats_values = stats_response.values
-        
+        stats_values = @sheets_service.get_spreadsheet_values(@spreadsheet_id, STAT_RANGE).values
         return [] unless stats_values
-        
-        user_range = "'사용자'!A2:D1000"
-        user_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, user_range)
-        user_values = user_response.values
-        
-        stats_values.map do |stats_row|
-          user_id = stats_row[0]
-          user_row = user_values&.find { |row| row[0] == user_id }
-          
+
+        user_values = @sheets_service.get_spreadsheet_values(@spreadsheet_id, "'사용자'!A2:F1000").values
+
+        stats_values.map do |r|
+          next unless r[0]
+          ur = user_values&.find { |row| row[0] == r[0] }
           {
-            "ID" => user_id,
-            "이름" => stats_row[1] || user_id,
-            "HP" => (stats_row[2] || "100").to_i,
-            "공격" => (stats_row[3] || "10").to_i,
-            "방어" => (stats_row[4] || "10").to_i,
-            "민첩성" => (stats_row[5] || "10").to_i,
-            "행운" => (stats_row[6] || "10").to_i,
-            "체력" => (stats_row[7] || "10").to_i,
-            "갈레온" => user_row ? (user_row[2] || "0").to_i : 0,
-            "아이템" => user_row ? (user_row[3] || "") : ""
+            "ID"   => r[0],
+            "이름" => r[1] || r[0],
+            "HP"   => (r[2] || "500").to_i,
+            "체력"  => (r[3] || "50").to_i,
+            "공격력" => (r[4] || "10").to_i,
+            "방어력" => (r[5] || "10").to_i,
+            "속도"  => (r[6] || "0").to_i,
+            "기술"  => (r[7] || "0").to_i,
+            "행운"  => (r[8] || "5").to_i,
+            "행동력" => (r[9] || "5").to_i,
+            "갈레온" => ur ? (ur[2] || "0").to_i : 0,
+            "아이템" => ur ? (ur[3] || "") : "",
+            "기숙사" => ur ? (ur[5] || "") : ""
           }
-        end
+        end.compact
       rescue => e
         puts "[SheetManager] 사용자 목록 오류: #{e.message}"
         []
@@ -212,107 +169,54 @@ class SheetManager
     end
   end
 
-  # 사용자 존재 확인
   def user_exists?(user_id)
     !find_user(user_id).nil?
   end
 
-  # 배치 업데이트 (여러 사용자 동시 업데이트)
-  def batch_update_users(updates_hash)
-    @mutex.synchronize do
-      begin
-        batch_data = []
-        
-        # 스탯 시트 데이터 가져오기
-        stats_range = "'스탯'!A2:H1000"
-        stats_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, stats_range)
-        stats_values = stats_response.values
-        
-        # 사용자 시트 데이터 가져오기
-        user_range = "'사용자'!A2:D1000"
-        user_response = @sheets_service.get_spreadsheet_values(@spreadsheet_id, user_range)
-        user_values = user_response.values
-        
-        return false unless stats_values
-        
-        updates_hash.each do |user_id, user_updates|
-          # 스탯 시트 업데이트
-          stats_row_index = stats_values.find_index { |row| row[0] == user_id }
-          
-          if stats_row_index
-            actual_row = stats_row_index + 2
-            
-            user_updates.each do |key, value|
-              col = case key
-                    when "HP", "현재체력" then "C"
-                    when "공격" then "D"
-                    when "방어" then "E"
-                    when "민첩성", "민첩" then "F"
-                    when "행운" then "G"
-                    when "체력" then "H"
-                    else nil
-                    end
-              
-              if col
-                batch_data << {
-                  range: "'스탯'!#{col}#{actual_row}",
-                  values: [[value]]
-                }
-              end
-            end
-          end
-          
-          # 사용자 시트 업데이트
-          if user_values
-            user_row_index = user_values.find_index { |row| row[0] == user_id }
-            
-            if user_row_index
-              actual_row = user_row_index + 2
-              
-              user_updates.each do |key, value|
-                col = case key
-                      when "갈레온" then "C"
-                      when "아이템" then "D"
-                      else nil
-                      end
-                
-                if col
-                  batch_data << {
-                    range: "'사용자'!#{col}#{actual_row}",
-                    values: [[value]]
-                  }
-                end
-              end
-            end
-          end
-        end
-        
-        if batch_data.any?
-          batch_update_request = Google::Apis::SheetsV4::BatchUpdateValuesRequest.new(
-            data: batch_data.map do |data|
-              Google::Apis::SheetsV4::ValueRange.new(
-                range: data[:range],
-                values: data[:values]
-              )
-            end,
-            value_input_option: 'USER_ENTERED'
-          )
-          
-          @sheets_service.batch_update_values(
-            @spreadsheet_id,
-            batch_update_request
-          )
-          
-          puts "[SheetManager] 배치 업데이트 완료: #{updates_hash.keys.join(', ')}"
-          return true
-        end
-        
-        false
-      rescue => e
-        puts "[SheetManager] 배치 업데이트 오류: #{e.message}"
-        puts e.backtrace[0..3]
-        false
-      end
-    end
+  def read_values(range)
+    @sheets_service.get_spreadsheet_values(@spreadsheet_id, range).values
+  rescue => e
+    puts "[SheetManager] read_values 오류: #{e.message}"
+    nil
+  end
+
+  def read(sheet_name, range)
+    read_values("#{sheet_name}!#{range}") || []
+  end
+
+  def append(sheet_name, row)
+    vr = Google::Apis::SheetsV4::ValueRange.new(values: [row])
+    @sheets_service.append_spreadsheet_value(
+      @spreadsheet_id, "#{sheet_name}!A:A", vr,
+      value_input_option: 'USER_ENTERED',
+      insert_data_option: 'INSERT_ROWS'
+    )
+  rescue => e
+    puts "[SheetManager] append 오류: #{e.message}"
+  end
+
+  def update_values(range, values)
+    vr = Google::Apis::SheetsV4::ValueRange.new(values: values)
+    @sheets_service.update_spreadsheet_value(
+      @spreadsheet_id, range, vr,
+      value_input_option: 'USER_ENTERED'
+    )
+  rescue => e
+    puts "[SheetManager] update_values 오류: #{e.message}"
+  end
+
+  def write(sheet_name, range, values)
+    update_values("#{sheet_name}!#{range}", values)
+  end
+
+  def append_values(range, values)
+    vr = Google::Apis::SheetsV4::ValueRange.new(values: values)
+    @sheets_service.append_spreadsheet_value(
+      @spreadsheet_id, range, vr,
+      value_input_option: 'USER_ENTERED',
+      insert_data_option: 'INSERT_ROWS'
+    )
+  rescue => e
+    puts "[SheetManager] append_values 오류: #{e.message}"
   end
 end
