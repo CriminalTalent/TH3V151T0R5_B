@@ -24,10 +24,10 @@ def run_once(runner_sheet, ops_sheet, mastodon)
 
   ops_sheet.turn_off_trigger
 
-  base_stats    = runner_sheet.read_base_stats
+  base_stats    = ops_sheet.read_base_stats
   current_state = runner_sheet.read_current_state
   commands      = runner_sheet.read_commands
-  skill_data    = runner_sheet.read_skill_data
+  skill_data    = ops_sheet.read_skill_data
   corrections   = ops_sheet.read_corrections
 
   puts "[전투봇] 캐릭터 #{current_state.size}명 / 커맨드 #{commands.size}개 / 보정 #{corrections.size}개"
@@ -39,7 +39,7 @@ def run_once(runner_sheet, ops_sheet, mastodon)
 
   state_list = updated_states.values
   runner_sheet.update_current_state(state_list)
-  puts "[전투봇] 현상태 시트 업데이트 완료"
+  puts "[전투봇] 현상태 업데이트 완료"
 
   toots = TootBuilder.new(round, turn, log).build
   puts "[전투봇] 툿 #{toots.size}개 생성"
