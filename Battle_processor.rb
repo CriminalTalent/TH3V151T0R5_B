@@ -1,8 +1,8 @@
 require_relative 'battle_calculator'
 
 class BattleProcessor
-  MOVE_SKILLS    = %w[이동 습격]
-  SUPPORT_SKILLS = %w[회복 활력 구원 강화 보호 희생 철벽 주의분산 즉발 백발백중 응원]
+  MOVE_SKILLS    = %w[이동 습격 순간이동]
+  SUPPORT_SKILLS = %w[회복 활력 구원 강화 보호 희생 철벽 주의분산 즉발 백발백중 응원 행운부여]
   ATTACK_SKILLS  = %w[공격 초인적인힘 흙뿌리기 혼란 습격 폭발 고육지책]
   DEFENSE_SKILLS = %w[방어 회피 복수 희생 철벽 주의분산 필사즉생 보호]
 
@@ -142,7 +142,14 @@ class BattleProcessor
         end
       when '즉발'
         t = targets.first
-        @log[:support] << "#{name} → [즉발] #{t}의 기술 쿨타임 0으로 (수동 확인 필요)"
+        @log[:support] << "\#{name} → [즉발] \#{t}의 기술 쿨타임 0으로 (수동 확인 필요)"
+      when '행운부여'
+        t = targets.first
+        if @states[t] && !cmd[:target_pos].empty?
+          old_pos = @states[t][:pos]
+          @states[t][:pos] = cmd[:target_pos]
+          @log[:support] << "\#{name} → [행운부여] \#{t}: \#{old_pos} → \#{cmd[:target_pos]}"
+        end
       end
     end
   end
@@ -152,6 +159,18 @@ class BattleProcessor
       next if @states[name][:hp] <= 0
       action = self.class.normalize(cmd[:action].to_s)
       next if action == '습격'  # 습격은 공격에서 처리
+
+      # 순간이동: 대상을 사거리 내 마스로 이동
+      if action == '순간이동'
+        t = cmd[:targets].first
+        dest = cmd[:target_pos].to_s.strip
+        if @states[t] && !dest.empty?
+          old_pos = @states[t][:pos]
+          @states[t][:pos] = dest
+          @log[:move] << "#{name} → [순간이동] #{t}: #{old_pos} → #{dest}"
+        end
+        next
+      end
 
       to = cmd[:move_to].to_s.strip
       from = @states[name][:pos].to_s.strip
