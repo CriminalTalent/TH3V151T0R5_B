@@ -1,6 +1,80 @@
 # main.rb
 $stdout.sync = true
-$stderr.sync = true
+$stderr.sync = truerequire 'dotenv'
+Dotenv.load(File.join(__dir__, '.env'))
+
+require_relative 'sheet_manager'
+require_relative 'mastodon_client'
+require_relative 'battle_processor'
+require_relative 'toot_builder'
+
+RUNNER_SHEET_ID  = ENV['RUNNER_SHEET_ID']   # 커맨드 시트 ID
+OPS_SHEET_ID     = ENV['OPS_SHEET_ID']      # 운영(전투) 시트 ID
+CREDENTIALS_PATH = File.join(__dir__, 'credentials.json')
+POLL_INTERVAL    = 30  # 초
+
+def run_once(runner_sheet, ops_sheet, mastodon)
+  trigger = ops_sheet.read_trigger
+  return unless trigger&.dig(:on)
+
+  round = trigger[:round]
+  turn  = trigger[:turn]
+  puts "[전투봇] 트리거 감지 — #{round}라운드 #{turn}턴"
+
+  # 즉시 OFF (중복 실행 방지)
+  ops_sheet.turn_off_trigger
+
+  # 데이터 읽기
+  base_stats    = runner_sheet.read_base_stats
+  current_state = runner_sheet.read_current_state
+  commands      = runner_sheet.read_commands
+  skill_data    = runner_sheet.read_skill_data
+  corrections   = ops_sheet.read_corrections
+
+  puts "[전투봇] 캐릭터 #{current_state.size}명 / 커맨드 #{commands.size}개 / 보정 #{corrections.size}개"
+
+  # 전투 계산
+  processor = BattleProcessor.new(base_stats, current_state, commands, skill_data, corrections, round, turn)
+  log, updated_states = processor.process
+
+  # 보정 항목 적용 완료 처리
+  ops_sheet.clear_corrections
+
+  # 현상태 시트 업데이트
+  state_list = updated_states.values
+  runner_sheet.update_current_state(state_list)
+  puts "[전투봇] 현상태 시트 업데이트 완료"
+
+  # 툿 생성 및 전송
+  toots = TootBuilder.new(round, turn, log).build
+  puts "[전투봇] 툿 #{toots.size}개 생성"
+
+  parent_id = nil
+  toots.each_with_index do |text, i|
+    sleep(1)
+    if i == 0
+      parent_id = mastodon.post_public(text)
+    else
+      parent_id = mastodon.reply_public(text, parent_id) if parent_id
+    end
+  end
+
+  puts "[전투봇] 전송 완료"
+rescue => e
+  puts "[전투봇 오류] #{e.message}"
+  puts e.backtrace.first(5)
+end
+
+puts "[전투봇] 시작"
+
+runner_sheet = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
+ops_sheet    = SheetManager.new(OPS_SHEET_ID, CREDENTIALS_PATH)
+mastodon     = MastodonClient.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
+
+loop do
+  run_once(runner_sheet, ops_sheet, mastodon)
+  sleep(POLL_INTERVAL)
+end
 
 require 'dotenv/load'
 require 'set'
