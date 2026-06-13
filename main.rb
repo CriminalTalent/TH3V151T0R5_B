@@ -19,14 +19,14 @@ def run_once(runner_sheet, ops_sheet, mastodon)
   return unless trigger&.dig(:on)
 
   round = trigger[:round]
-  turn  = trigger[:turn]
-  puts "[전투봇] 트리거 감지 — #{round}라운드 #{turn}턴"
+  turn  = trigger[:turn]  # 1=A팀(선공), 2=B팀(후공)
+  puts "[전투봇] 트리거 감지 — #{round}라운드 #{turn == 1 ? 'A팀(선공)' : 'B팀(후공)'}"
 
   ops_sheet.turn_off_trigger
 
   base_stats    = ops_sheet.read_base_stats
-  current_state = runner_sheet.read_current_state
-  commands      = runner_sheet.read_commands
+  current_state = runner_sheet.read_current_state(turn)
+  commands      = runner_sheet.read_commands(turn)
   skill_data    = ops_sheet.read_skill_data
   corrections   = ops_sheet.read_corrections
 
@@ -37,9 +37,32 @@ def run_once(runner_sheet, ops_sheet, mastodon)
 
   ops_sheet.clear_corrections
 
-  state_list = updated_states.values
-  runner_sheet.update_current_state(state_list)
-  puts "[전투봇] 현상태 업데이트 완료"
+  # max_hp 보정
+  state_list = updated_states.values.map do |s|
+    base = base_stats.find { |b| b[:name] == s[:name] }
+    s[:max_hp] = base ? base[:hp] : s[:hp]
+    s
+  end
+
+  # A팀+B팀 전체 상태로 맵 업데이트
+  all_a = runner_sheet.read_current_state_a
+  all_b = runner_sheet.read_current_state_b
+  all_states = all_a + all_b
+
+  # 이번 턴 정산 결과 반영
+  state_list.each do |s|
+    existing = all_states.find { |x| x[:name] == s[:name] }
+    if existing
+      existing[:hp]  = s[:hp]
+      existing[:pos] = s[:pos]
+    else
+      all_states << s
+    end
+  end
+
+  runner_sheet.update_current_state(state_list, turn)
+  runner_sheet.update_map(all_states)
+  puts "[전투봇] 현황 + 맵 업데이트 완료"
 
   toots = TootBuilder.new(round, turn, log).build
   puts "[전투봇] 툿 #{toots.size}개 생성"
