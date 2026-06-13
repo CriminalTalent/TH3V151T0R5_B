@@ -18,38 +18,47 @@ def run_once(runner_sheet, ops_sheet, mastodon)
   trigger = ops_sheet.read_trigger
   return unless trigger&.dig(:on)
 
-  round = trigger[:round]
-  turn  = trigger[:turn]  # 1=A팀(선공), 2=B팀(후공)
-  puts "[전투봇] 트리거 감지 — #{round}라운드 #{turn == 1 ? 'A팀(선공)' : 'B팀(후공)'}"
+  round     = trigger[:round]
+  team_name = trigger[:team]
+  is_first  = trigger[:first]
+
+  puts "[전투봇] 트리거 감지 — #{round}라운드 #{team_name}(#{is_first ? '선공' : '후공'})"
 
   ops_sheet.turn_off_trigger
 
+  mastodon.post_public(
+    "[ #{round}라운드 — #{team_name} 행동 개시 (#{is_first ? '선공' : '후공'}) ]\n정산을 시작합니다."
+  )
+  sleep(1)
+
   base_stats    = ops_sheet.read_base_stats
-  current_state = runner_sheet.read_current_state(turn)
-  commands      = runner_sheet.read_commands(turn)
+  current_state = runner_sheet.read_current_state(team_name)
+  commands      = runner_sheet.read_commands(team_name)
   skill_data    = ops_sheet.read_skill_data
   corrections   = ops_sheet.read_corrections
+  cooldowns     = ops_sheet.read_cooldowns
 
   puts "[전투봇] 캐릭터 #{current_state.size}명 / 커맨드 #{commands.size}개 / 보정 #{corrections.size}개"
 
-  processor = BattleProcessor.new(base_stats, current_state, commands, skill_data, corrections, round, turn)
-  log, updated_states = processor.process
+  processor = BattleProcessor.new(
+    base_stats, current_state, commands, skill_data,
+    corrections, cooldowns, round, team_name
+  )
+  log, updated_states, updated_cooldowns = processor.process
 
   ops_sheet.clear_corrections
+  ops_sheet.write_cooldowns(updated_cooldowns)
 
-  # max_hp 보정
   state_list = updated_states.values.map do |s|
     base = base_stats.find { |b| b[:name] == s[:name] }
     s[:max_hp] = base ? base[:hp] : s[:hp]
     s
   end
 
-  # A팀+B팀 전체 상태로 맵 업데이트
-  all_a = runner_sheet.read_current_state_a
-  all_b = runner_sheet.read_current_state_b
+  all_a      = runner_sheet.read_current_state_a
+  all_b      = runner_sheet.read_current_state_b
   all_states = all_a + all_b
 
-  # 이번 턴 정산 결과 반영
   state_list.each do |s|
     existing = all_states.find { |x| x[:name] == s[:name] }
     if existing
@@ -60,21 +69,17 @@ def run_once(runner_sheet, ops_sheet, mastodon)
     end
   end
 
-  runner_sheet.update_current_state(state_list, turn)
+  runner_sheet.update_current_state(state_list, team_name)
   runner_sheet.update_map(all_states)
-  puts "[전투봇] 현황 + 맵 업데이트 완료"
+  puts "[전투봇] 현황 + 맵 + 쿨타임 업데이트 완료"
 
-  toots = TootBuilder.new(round, turn, log).build
+  toots = TootBuilder.new(round, team_name, is_first, log).build
   puts "[전투봇] 툿 #{toots.size}개 생성"
 
   parent_id = nil
   toots.each_with_index do |text, i|
     sleep(1)
-    if i == 0
-      parent_id = mastodon.post_public(text)
-    else
-      parent_id = mastodon.reply_public(text, parent_id) if parent_id
-    end
+    parent_id = i == 0 ? mastodon.post_public(text) : mastodon.reply_public(text, parent_id)
   end
 
   puts "[전투봇] 전송 완료"

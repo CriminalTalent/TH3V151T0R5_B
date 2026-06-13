@@ -1,26 +1,25 @@
 require_relative 'battle_calculator'
 
 class BattleProcessor
-  MOVE_SKILLS    = %w[이동 습격 순간이동]
-  SUPPORT_SKILLS = %w[회복 활력 구원 강화 보호 희생 철벽 주의분산 즉발 백발백중 응원 행운부여]
-  ATTACK_SKILLS  = %w[공격 초인적인힘 흙뿌리기 혼란 습격 폭발 고육지책]
-  DEFENSE_SKILLS = %w[방어 회피 복수 희생 철벽 주의분산 필사즉생 보호]
+  SUPPORT_SKILLS = %w[회복 활력 구원 강화 보호 희생 철벽 주의분산 즉발 백발백중 응원 행운부여].freeze
+  ATTACK_SKILLS  = %w[공격 초인적인힘 흙뿌리기 혼란 습격 폭발 고육지책].freeze
+  DEFENSE_SKILLS = %w[방어 회피 복수 희생 철벽 주의분산 필사즉생 보호].freeze
 
-  # 스킬명 정규화 (공백 제거)
   def self.normalize(name)
     name.to_s.strip.gsub(/\s+/, '')
   end
 
-  def initialize(base_stats, current_states, commands, skill_data, corrections, round, turn)
-    @base   = base_stats.each_with_object({}) { |s, h| h[s[:name]] = s }
-    @states = current_states.each_with_object({}) { |s, h| h[s[:name]] = s.dup }
-    @cmds   = commands.each_with_object({}) { |c, h| h[c[:name]] = c }
-    @skills = skill_data.each_with_object({}) { |s, h| h[self.class.normalize(s[:name])] = s }
-    @corr   = corrections
-    @round  = round
-    @turn   = turn
-    @log    = { support: [], move: [], attack: [], defense: [], result: [] }
-    @buffs  = {}
+  def initialize(base_stats, current_states, commands, skill_data, corrections, cooldowns, round, team_name)
+    @base      = base_stats.each_with_object({}) { |s, h| h[s[:name]] = s }
+    @states    = current_states.each_with_object({}) { |s, h| h[s[:name]] = s.dup }
+    @cmds      = commands.each_with_object({}) { |c, h| h[c[:name]] = c }
+    @skills    = skill_data.each_with_object({}) { |s, h| h[self.class.normalize(s[:name])] = s }
+    @corr      = corrections
+    @cooldowns = cooldowns
+    @round     = round
+    @team_name = team_name
+    @log       = { support: [], move: [], attack: [], defense: [], result: [] }
+    @buffs     = {}
     init_buffs
   end
 
@@ -31,7 +30,8 @@ class BattleProcessor
     process_attack
     process_defense
     build_result_log
-    [@log, @states]
+    updated_cooldowns = advance_cooldowns
+    [@log, @states, updated_cooldowns]
   end
 
   private
@@ -42,9 +42,42 @@ class BattleProcessor
         atk_up: 0, dur_up: 0, agi_up: 0, tec_up: 0, luck_up: 0,
         shield: 0, guardian: nil, guaranteed: false,
         indomitable: false, stunned: false, confused: 0,
-        blinded: false, revenge: false
+        blinded: false, revenge_ready: false, defense_stance: false
       }
     end
+  end
+
+  def on_cooldown?(name, action)
+    @cooldowns.dig(name, action).to_i > 0
+  end
+
+  def set_cooldown(name, action)
+    skill = @skills[action]
+    return unless skill
+    cd_str = skill[:cooldown].to_s.strip
+    return if cd_str.empty? || cd_str == '0'
+    if cd_str.include?('회')
+      @cooldowns[name] ||= {}
+      @cooldowns[name][action] = 999
+      return
+    end
+    cd = cd_str.to_i
+    return if cd <= 0
+    @cooldowns[name] ||= {}
+    @cooldowns[name][action] = cd
+  end
+
+  def advance_cooldowns
+    result = {}
+    @cooldowns.each do |name, skills|
+      skills.each do |skill, left|
+        next if left <= 0
+        new_left = left == 999 ? 999 : left - 1
+        result[name] ||= {}
+        result[name][skill] = new_left if new_left > 0
+      end
+    end
+    result
   end
 
   def apply_corrections
@@ -66,32 +99,40 @@ class BattleProcessor
         @states[name][:pos] = c[:value] unless c[:value].empty?
         @log[:support] << "#{name}: #{c[:value]}에 부활"
       when '쿨타임초기화'
-        @log[:support] << "#{name}: 쿨타임 초기화 (수동)"
+        target_skill = c[:value].to_s.strip
+        if target_skill.empty?
+          @cooldowns.delete(name)
+          @log[:support] << "#{name}: 전체 쿨타임 초기화"
+        else
+          @cooldowns[name]&.delete(target_skill)
+          @log[:support] << "#{name}: [#{target_skill}] 쿨타임 초기화"
+        end
       end
     end
   end
 
   def process_support
     @cmds.each do |name, cmd|
-      action_raw = cmd[:action].to_s.strip
-      action = self.class.normalize(action_raw)
+      action = self.class.normalize(cmd[:action].to_s)
       next if action.empty? || action == '미행동'
       next if @states[name][:hp] <= 0
-
       skill = @skills[action]
       next unless skill && skill[:type] == '지원'
-
-      targets = cmd[:targets]
-      base = @base[name]
-      caster_atk = (base[:atk] + @buffs[name][:atk_up]).to_i
-
+      if on_cooldown?(name, action)
+        @log[:support] << "#{name} → [#{action}]: 쿨타임 중 (#{@cooldowns.dig(name, action)}라운드 남음)"
+        next
+      end
+      targets     = cmd[:targets]
+      base        = @base[name]
+      caster_atk  = (base[:atk]  + @buffs[name][:atk_up]).to_i
+      caster_luck = (base[:luck] + @buffs[name][:luck_up]).to_i
       case action
       when '회복'
         t = targets.first || name
         if @states[t]
-          is_crit = BattleCalculator.critical?(base[:luck].to_i + @buffs[name][:luck_up].to_i)
-          heal = BattleCalculator.calc_heal('회복', caster_atk, is_critical: is_crit)
-          max_hp = @base[t]&.dig(:hp) || @states[t][:hp]
+          is_crit = BattleCalculator.critical?(caster_luck)
+          heal    = BattleCalculator.calc_heal('회복', caster_atk, is_critical: is_crit)
+          max_hp  = @base[t]&.dig(:hp) || @states[t][:hp]
           @states[t][:hp] = [@states[t][:hp] + heal, max_hp].min
           crit_str = is_crit ? ' (크리티컬!)' : ''
           @log[:support] << "#{name} → [회복] #{t} 건강 +#{heal}#{crit_str} (현재: #{@states[t][:hp]})"
@@ -99,9 +140,9 @@ class BattleProcessor
       when '활력'
         t = targets.first || name
         if @states[t]
-          is_crit = BattleCalculator.critical?(base[:luck].to_i + @buffs[name][:luck_up].to_i)
-          heal = BattleCalculator.calc_heal('활력', caster_atk, is_critical: is_crit)
-          max_hp = @base[t]&.dig(:hp) || @states[t][:hp]
+          is_crit = BattleCalculator.critical?(caster_luck)
+          heal    = BattleCalculator.calc_heal('활력', caster_atk, is_critical: is_crit)
+          max_hp  = @base[t]&.dig(:hp) || @states[t][:hp]
           @states[t][:hp] = [@states[t][:hp] + heal, max_hp].min
           crit_str = is_crit ? ' (크리티컬!)' : ''
           @log[:support] << "#{name} → [활력] #{t} 건강 +#{heal}#{crit_str} (현재: #{@states[t][:hp]})"
@@ -109,19 +150,19 @@ class BattleProcessor
       when '구원'
         targets.each do |t|
           next unless @states[t]
-          is_crit = BattleCalculator.critical?(base[:luck].to_i + @buffs[name][:luck_up].to_i)
-          heal = BattleCalculator.calc_heal('구원', caster_atk, is_critical: is_crit)
-          max_hp = @base[t]&.dig(:hp) || @states[t][:hp]
+          is_crit = BattleCalculator.critical?(caster_luck)
+          heal    = BattleCalculator.calc_heal('구원', caster_atk, is_critical: is_crit)
+          max_hp  = @base[t]&.dig(:hp) || @states[t][:hp]
           @states[t][:hp] = [@states[t][:hp] + heal, max_hp].min
           @log[:support] << "#{name} → [구원] #{t} 건강 +#{heal}"
         end
       when '강화'
         bonus = (caster_atk * 0.5).ceil
-        targets.each do |t|
-          next unless @buffs[t]
-          @buffs[t][:atk_up] += bonus
+        valid_targets = targets.select do |t|
+          @states[t] && BattleCalculator.in_range?(skill[:range], @states[name][:pos], @states[t][:pos])
         end
-        @log[:support] << "#{name} → [강화] #{targets.join(', ')} 마법능력 +#{bonus}"
+        valid_targets.each { |t| @buffs[t][:atk_up] += bonus }
+        @log[:support] << "#{name} → [강화] #{valid_targets.join(', ')} 마법능력 +#{bonus}"
       when '보호'
         targets.first(3).each do |t|
           next unless @buffs[t]
@@ -130,27 +171,34 @@ class BattleProcessor
         @log[:support] << "#{name} → [보호] #{targets.first(3).join(', ')}에게 보호막 30"
       when '백발백중'
         t = targets.first
-        if @buffs[t]
+        if t && @buffs[t]
           @buffs[t][:guaranteed] = true
           @log[:support] << "#{name} → [백발백중] #{t} 이번 행동 반드시 성공 + 크리티컬 전환"
         end
       when '응원'
         t = targets.first
-        if @buffs[t]
+        if t && @buffs[t]
           @buffs[t][:luck_up] += 10
           @log[:support] << "#{name} → [응원] #{t} 행운 +10 (2턴)"
         end
       when '즉발'
         t = targets.first
-        @log[:support] << "\#{name} → [즉발] \#{t}의 기술 쿨타임 0으로 (수동 확인 필요)"
+        skill_to_reset = cmd[:target_pos].to_s.strip
+        if t && !skill_to_reset.empty?
+          @cooldowns[t]&.delete(skill_to_reset)
+          @log[:support] << "#{name} → [즉발] #{t}의 [#{skill_to_reset}] 쿨타임 초기화"
+        else
+          @log[:support] << "#{name} → [즉발] 대상 스킬명 미입력 (무효)"
+        end
       when '행운부여'
         t = targets.first
         if @states[t] && !cmd[:target_pos].empty?
           old_pos = @states[t][:pos]
           @states[t][:pos] = cmd[:target_pos]
-          @log[:support] << "\#{name} → [행운부여] \#{t}: \#{old_pos} → \#{cmd[:target_pos]}"
+          @log[:support] << "#{name} → [행운부여] #{t}: #{old_pos} → #{cmd[:target_pos]}"
         end
       end
+      set_cooldown(name, action)
     end
   end
 
@@ -158,30 +206,25 @@ class BattleProcessor
     @cmds.each do |name, cmd|
       next if @states[name][:hp] <= 0
       action = self.class.normalize(cmd[:action].to_s)
-      next if action == '습격'  # 습격은 공격에서 처리
-
-      # 순간이동: 대상을 사거리 내 마스로 이동
+      next if action == '습격'
       if action == '순간이동'
-        t = cmd[:targets].first
+        t    = cmd[:targets].first
         dest = cmd[:target_pos].to_s.strip
-        if @states[t] && !dest.empty?
+        if t && @states[t] && !dest.empty?
           old_pos = @states[t][:pos]
           @states[t][:pos] = dest
           @log[:move] << "#{name} → [순간이동] #{t}: #{old_pos} → #{dest}"
         end
         next
       end
-
-      to = cmd[:move_to].to_s.strip
+      to   = cmd[:move_to].to_s.strip
       from = @states[name][:pos].to_s.strip
       next if to.empty? || to == from
-
       dist = BattleCalculator.move_cost(from, to)
-      if dist > 1
-        @log[:move] << "#{name}: 이동 불가 — 최대 1칸 (#{from}→#{to} #{dist}칸)"
+      if dist > 5
+        @log[:move] << "#{name}: 이동 불가 — 최대 5칸 (#{from}→#{to}, #{dist}칸)"
         next
       end
-
       @states[name][:pos] = to
       @log[:move] << "#{name}: #{from} → #{to}"
     end
@@ -192,123 +235,138 @@ class BattleProcessor
       action = self.class.normalize(cmd[:action].to_s)
       next unless ATTACK_SKILLS.include?(action)
       next if @states[name][:hp] <= 0
-
       base = @base[name]
-      caster_atk = (base[:atk] + @buffs[name][:atk_up]).to_i
-      caster_tec = (base[:tec] + @buffs[name][:tec_up]).to_i
+      next unless base
+      if on_cooldown?(name, action)
+        @log[:attack] << "#{name} → [#{action}]: 쿨타임 중 (#{@cooldowns.dig(name, action)}라운드 남음)"
+        next
+      end
+      skill       = @skills[action]
+      caster_atk  = (base[:atk]  + @buffs[name][:atk_up]).to_i
+      caster_tec  = (base[:tec]  + @buffs[name][:tec_up]).to_i
       caster_luck = (base[:luck] + @buffs[name][:luck_up]).to_i
-
-      targets = cmd[:targets]
-
+      caster_pos  = @states[name][:pos]
+      caster_facing = base[:facing].to_s.strip
+      targets = if action == '폭발'
+                  @states.keys.select do |tname|
+                    next false if @states[tname][:hp] <= 0
+                    next false if same_team?(name, tname)
+                    rng = skill ? skill[:range] : '2'
+                    BattleCalculator.in_range?(rng, caster_pos, @states[tname][:pos])
+                  end
+                else
+                  cmd[:targets]
+                end
+      if targets.empty?
+        @log[:attack] << "#{name} → [#{action}]: 대상 없음"
+        next
+      end
       targets.each do |tname|
         next unless @states[tname]
         next if @states[tname][:hp] <= 0
-
         tgt_state = @states[tname]
         tgt_base  = @base[tname]
         next unless tgt_base
-
-        tgt_dur   = (tgt_base[:dur] + @buffs[tname][:dur_up]).to_i
-        tgt_agi   = (tgt_base[:agi] + @buffs[tname][:agi_up]).to_i
-
-        # 속박 확인
+        tgt_pos = tgt_state[:pos]
+        unless action == '습격' || action == '고육지책'
+          rng = skill ? skill[:range] : '-'
+          unless BattleCalculator.in_range?(rng, caster_pos, tgt_pos)
+            @log[:attack] << "#{name} → [#{action}] #{tname}: 사거리 밖"
+            next
+          end
+        end
+        if action == '흙뿌리기'
+          unless BattleCalculator.in_front?(caster_pos, tgt_pos, caster_facing)
+            @log[:attack] << "#{name} → [흙뿌리기] #{tname}: 머리방향 전방이 아님 (facing: #{caster_facing})"
+            next
+          end
+        end
+        if action == '습격'
+          ally_positions = @states.select { |n, s| n != name && s[:hp] > 0 && same_team?(name, n) }
+                                  .values.map { |s| s[:pos] }
+          if BattleCalculator.path_blocked?(caster_pos, tgt_pos, ally_positions)
+            @log[:attack] << "#{name} → [습격] #{tname}: 아군이 경로를 막고 있음"
+            next
+          end
+          old_pos = caster_pos
+          @states[name][:pos] = tgt_pos
+          @log[:move] << "#{name}: [습격] #{old_pos} → #{tgt_pos}"
+          caster_pos = tgt_pos
+        end
         if @buffs[tname]&.dig(:stunned)
-          @log[:attack] << "#{name} → [#{action}] #{tname}: 속박 상태"
+          @log[:attack] << "#{name} → [#{action}] #{tname}: 행동 불가 상태"
           next
         end
-
-        # 명중 판정 (백발백중이면 스킵)
+        tgt_agi   = (tgt_base[:agi] + @buffs[tname][:agi_up]).to_i
         guaranteed = @buffs[name][:guaranteed]
         unless guaranteed
-          unless BattleCalculator.hit?(caster_tec, 0)
+          unless BattleCalculator.hit?(caster_tec)
             @log[:attack] << "#{name} → [#{action}] #{tname}: 빗나감"
             next
           end
-          # 회피 판정
           if BattleCalculator.evade?(tgt_agi)
             @log[:attack] << "#{name} → [#{action}] #{tname}: 회피"
             next
           end
         end
-
-        # 크리티컬 판정
         is_crit = guaranteed || BattleCalculator.critical?(caster_luck)
-
-        # 습격: 거리 계산
         extra_params = {}
         if action == '습격'
-          from = @states[name][:pos]
-          extra_params[:distance] = BattleCalculator.distance(from, tgt_state[:pos])
+          extra_params[:distance] = BattleCalculator.distance(@states[name][:pos], tgt_pos)
         end
-
-        # 고육지책: HP 차감량
         if action == '고육지책'
           sacrifice = cmd[:extra].to_i
           extra_params[:hp_sacrifice] = sacrifice
           @states[name][:hp] -= sacrifice
+          @log[:attack] << "#{name}: [고육지책] 자기 건강 -#{sacrifice}"
         end
-
         raw_dmg = BattleCalculator.calc_skill_damage(
-          action.gsub(/([가-힣])/, ' \1').strip,
-          caster_atk,
-          is_critical: is_crit,
-          extra_params: extra_params
+          action, caster_atk, is_critical: is_crit, extra_params: extra_params
         )
-
-        # 방어태세 적용 (1.5배 내구도)
-        effective_dur = tgt_dur
-        if @buffs[tname][:defense_stance]
-          effective_dur = (tgt_dur * 1.5).ceil
-        end
-
-        dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
-
-        # 불굴 처리
-        if @buffs[tname][:indomitable] && tgt_state[:hp] - dmg <= 0
-          dmg = tgt_state[:hp] - 1
-        end
-
-        # 보호막 처리
-        if @buffs[tname][:shield] > 0
-          absorbed = [@buffs[tname][:shield], dmg].min
-          @buffs[tname][:shield] -= absorbed
-          dmg -= absorbed
-        end
-
-        tgt_state[:hp] = [tgt_state[:hp] - dmg, 0].max
-
-        crit_str = is_crit ? ' (크리티컬!)' : ''
-        @log[:attack] << "#{name} → [#{action}] #{tname}: 명중#{crit_str} / 피해 #{dmg} (건강 #{tgt_state[:hp]})"
-
-        # 상태이상 부여
-        if action == '혼란'
-          @buffs[tname][:confused] = (@buffs[tname][:confused] || 0) + 1
-          confused_count = @buffs[tname][:confused]
-          @log[:attack] << "#{tname}: [혼란] 중첩 #{confused_count}/5"
-          if confused_count >= 5
-            @buffs[tname][:stunned] = true
-            @log[:attack] << "#{tname}: [혼란] 5중첩 — 해당 턴 행동 불가"
+        actual_target = tname
+        if @buffs[tname][:guardian]
+          guardian = @buffs[tname][:guardian]
+          if @states[guardian] && @states[guardian][:hp] > 0
+            actual_target = guardian
+            @log[:attack] << "#{guardian} → [희생] #{tname} 대신 피격"
           end
         end
-
+        tgt_dur_final = ((@base[actual_target]&.dig(:dur) || 0) + @buffs[actual_target][:dur_up]).to_i
+        effective_dur = @buffs[actual_target][:defense_stance] ? (tgt_dur_final * 1.5).ceil : tgt_dur_final
+        dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
+        if @buffs[actual_target][:indomitable] && @states[actual_target][:hp] - dmg <= 0
+          dmg = @states[actual_target][:hp] - 1
+        end
+        if @buffs[actual_target][:shield] > 0
+          absorbed = [@buffs[actual_target][:shield], dmg].min
+          @buffs[actual_target][:shield] -= absorbed
+          dmg -= absorbed
+        end
+        @states[actual_target][:hp] = [@states[actual_target][:hp] - dmg, 0].max
+        crit_str = is_crit ? ' (크리티컬!)' : ''
+        @log[:attack] << "#{name} → [#{action}] #{tname}: 명중#{crit_str} / 피해 #{dmg} (건강 #{@states[actual_target][:hp]})"
+        if action == '혼란'
+          @buffs[tname][:confused] = (@buffs[tname][:confused] || 0) + 1
+          cnt = @buffs[tname][:confused]
+          @log[:attack] << "#{tname}: [혼란] 중첩 #{cnt}/5"
+          if cnt >= 5
+            @buffs[tname][:stunned] = true
+            @log[:attack] << "#{tname}: [혼란] 5중첩 — 행동 불가"
+          end
+        end
         if action == '흙뿌리기'
           @buffs[tname][:blinded] = true
           @buffs[tname][:atk_up] -= (tgt_base[:atk] * 0.2).ceil
           @log[:attack] << "#{tname}: [시야차단] 마법능력 20% 감소"
         end
-
-        # 복수 대기 등록
         if @buffs[tname][:revenge_ready] && dmg > 0
           revenge_dmg = dmg * 2
           @states[name][:hp] = [@states[name][:hp] - revenge_dmg, 0].max
           @log[:defense] << "#{tname} → [복수] #{name}: 피해 #{revenge_dmg}"
         end
-
-        # 사망
-        if tgt_state[:hp] <= 0
-          @log[:result] << "#{tname}: 건강 0 — 전투 불능."
-        end
+        @log[:result] << "#{actual_target}: 건강 0 — 전투 불능." if @states[actual_target][:hp] <= 0
       end
+      set_cooldown(name, action)
     end
   end
 
@@ -317,15 +375,18 @@ class BattleProcessor
       action = self.class.normalize(cmd[:action].to_s)
       next unless DEFENSE_SKILLS.include?(action)
       next if @states[name][:hp] <= 0
-
+      if on_cooldown?(name, action)
+        @log[:defense] << "#{name} → [#{action}]: 쿨타임 중 (#{@cooldowns.dig(name, action)}라운드 남음)"
+        next
+      end
       base = @base[name]
-
+      next unless base
       case action
       when '방어'
         t = cmd[:targets].first || name
         if @buffs[t]
-          @buffs[t][:dur_up] += (@base[t]&.dig(:dur).to_i * 0.5).ceil
-          @log[:defense] << "#{name} → [방어] #{t} 내구도 1.5배"
+          @buffs[t][:defense_stance] = true
+          @log[:defense] << "#{name} → [방어] #{t} 방어태세 (내구도 1.5배)"
         end
       when '회피'
         @buffs[name][:agi_up] += 20
@@ -335,7 +396,7 @@ class BattleProcessor
         @log[:defense] << "#{name} → [복수] 피격 시 2배 반격 대기"
       when '희생'
         t = cmd[:targets].first
-        if @states[t]
+        if t && @states[t]
           @buffs[t][:guardian] = name
           @log[:defense] << "#{name} → [희생] #{t}의 피격 대신 받음"
         end
@@ -345,17 +406,18 @@ class BattleProcessor
           next unless @buffs[t]
           @buffs[t][:dur_up] += bonus
         end
-        @log[:defense] << "#{name} → [철벽] 사거리 내 전원 내구도 +#{bonus}"
+        @log[:defense] << "#{name} → [철벽] #{cmd[:targets].join(', ')} 내구도 +#{bonus}"
       when '주의분산'
         cmd[:targets].each do |t|
           next unless @buffs[t]
           @buffs[t][:agi_up] += 15
         end
-        @log[:defense] << "#{name} → [주의분산] 사거리 내 전원 민첩 +15"
+        @log[:defense] << "#{name} → [주의분산] #{cmd[:targets].join(', ')} 민첩 +15"
       when '필사즉생'
         @buffs[name][:indomitable] = true
         @log[:defense] << "#{name} → [필사즉생] 이번 턴 건강 0 이하 방지"
       end
+      set_cooldown(name, action)
     end
   end
 
@@ -364,5 +426,9 @@ class BattleProcessor
       shield_str = @buffs[name][:shield] > 0 ? " [보호막 #{@buffs[name][:shield]}]" : ""
       @log[:result] << "#{name}: 건강 #{state[:hp]}#{shield_str}"
     end
+  end
+
+  def same_team?(name1, name2)
+    @cmds.key?(name1) && @cmds.key?(name2)
   end
 end

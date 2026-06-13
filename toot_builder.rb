@@ -1,15 +1,16 @@
 class TootBuilder
   MAX_LENGTH = 490
 
-  def initialize(round, turn, log)
-    @round = round
-    @turn  = turn
-    @log   = log
+  def initialize(round, team_name, is_first, log)
+    @round     = round
+    @team_name = team_name
+    @is_first  = is_first
+    @log       = log
   end
 
   def build
-    team = @turn == 1 ? '선공' : '후공'
-    header = "[#{@round}라운드] #{team}팀 행동 정산"
+    order  = @is_first ? '선공' : '후공'
+    header = "[#{@round}라운드] #{@team_name} (#{order}) 행동 정산"
 
     toots = []
 

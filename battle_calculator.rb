@@ -1,11 +1,16 @@
 class BattleCalculator
 
+  def self.parse_pos(pos)
+    return nil if pos.to_s.strip.empty?
+    col = pos[0].upcase.ord - 'A'.ord
+    row = pos[1..].to_i - 1
+    [col, row]
+  end
+
   def self.distance(pos1, pos2)
-    return 999 if pos1.to_s.empty? || pos2.to_s.empty?
-    c1 = pos1[0].upcase.ord - 'A'.ord
-    r1 = pos1[1..].to_i
-    c2 = pos2[0].upcase.ord - 'A'.ord
-    r2 = pos2[1..].to_i
+    c1, r1 = parse_pos(pos1)
+    c2, r2 = parse_pos(pos2)
+    return 999 if c1.nil? || c2.nil?
     (c1 - c2).abs + (r1 - r2).abs
   end
 
@@ -16,15 +21,43 @@ class BattleCalculator
     distance(pos1, pos2) <= max_range
   end
 
-  # 명중 판정 - 기본 60%
-  def self.hit?(attacker_tec, target_agi, extra_dodge = 0)
-    hit_rate = [60 + attacker_tec - extra_dodge, 0].max
+  def self.path_blocked?(from, to, ally_positions)
+    fc, fr = parse_pos(from)
+    tc, tr = parse_pos(to)
+    return false if fc.nil? || tc.nil?
+    dc = tc == fc ? 0 : (tc - fc) / (tc - fc).abs
+    dr = tr == fr ? 0 : (tr - fr) / (tr - fr).abs
+    return false unless dc == 0 || dr == 0
+    c, r = fc + dc, fr + dr
+    while [c, r] != [tc, tr]
+      cell = "#{('A'.ord + c).chr}#{r + 1}"
+      return true if ally_positions.include?(cell)
+      c += dc
+      r += dr
+    end
+    false
+  end
+
+  def self.in_front?(caster_pos, target_pos, facing)
+    cc, cr = parse_pos(caster_pos)
+    tc, tr = parse_pos(target_pos)
+    return false if cc.nil? || tc.nil?
+    case facing
+    when '상' then tc == cc && tr == cr - 1
+    when '하' then tc == cc && tr == cr + 1
+    when '좌' then tr == cr && tc == cc - 1
+    when '우' then tr == cr && tc == cc + 1
+    else false
+    end
+  end
+
+  def self.hit?(attacker_tec)
+    hit_rate = [60 + attacker_tec, 0].max
     roll = rand(1..100)
     puts "[명중] 명중률 #{hit_rate}% / 주사위 #{roll} → #{roll <= hit_rate ? '명중' : '빗나감'}"
     roll <= hit_rate
   end
 
-  # 회피 판정 - 민첩 기반 자동
   def self.evade?(target_agi)
     evade_rate = target_agi * 2
     return false if evade_rate <= 0
@@ -33,7 +66,6 @@ class BattleCalculator
     roll <= evade_rate
   end
 
-  # 크리티컬 판정 - 행운 기반 자동
   def self.critical?(luck)
     crit_rate = luck * 2
     return false if crit_rate <= 0
@@ -43,49 +75,43 @@ class BattleCalculator
     result
   end
 
-  # 피격 대미지: (공격 수식) - 내구도
   def self.calc_damage(base_attack, defender_dur, ignore_def: false)
-    if ignore_def
-      [base_attack, 0].max
-    else
-      [base_attack - defender_dur, 0].max
-    end
+    ignore_def ? [base_attack, 0].max : [base_attack - defender_dur, 0].max
   end
 
-  # 스킬별 공격 배율 적용
   def self.calc_skill_damage(skill_name, base_atk, is_critical: false, extra_params: {})
-    multiplier = case skill_name
-    when '공격'        then 1.0
-    when '초인적인 힘'  then 2.0
-    when '흙 뿌리기'   then 1.5
-    when '혼란'        then 1.0
-    when '습격'
-      dist = extra_params[:distance] || 0
-      dist >= 5 ? 2.5 : 1.5
-    when '폭발'        then 1.0
-    when '고육지책'
+    if skill_name == '고육지책'
       sacrifice = extra_params[:hp_sacrifice] || 0
       bonus = (sacrifice / 10) * 5
-      return base_atk + bonus
-    else 1.0
+      dmg = base_atk + bonus
+      dmg = (dmg * 2).ceil if is_critical
+      return dmg
     end
-
+    multiplier = case skill_name
+                 when '공격'      then 1.0
+                 when '초인적인힘' then 2.0
+                 when '흙뿌리기'  then 1.5
+                 when '혼란'      then 1.0
+                 when '습격'
+                   dist = extra_params[:distance] || 0
+                   dist >= 5 ? 2.5 : 1.5
+                 when '폭발'      then 1.0
+                 else 1.0
+                 end
     dmg = (base_atk * multiplier).ceil
-    dmg = base_atk * 2 if is_critical  # 크리티컬: 마법능력 2배
+    dmg = (dmg * 2).ceil if is_critical
     dmg
   end
 
-  # 회복량 계산
   def self.calc_heal(skill_name, base_atk, is_critical: false)
     multiplier = case skill_name
-    when '회복'   then 0.2
-    when '활력'   then 1.0
-    when '구원'   then 0.5
-    when '강화'   then 0.5  # 강화는 공격력 증가
-    else 0.0
-    end
+                 when '회복' then 0.2
+                 when '활력' then 1.0
+                 when '구원' then 0.5
+                 else 0.0
+                 end
     heal = (base_atk * multiplier).ceil
-    heal = (base_atk * multiplier * 2).ceil if is_critical
+    heal = (heal * 2).ceil if is_critical
     heal
   end
 
