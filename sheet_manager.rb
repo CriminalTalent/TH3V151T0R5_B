@@ -28,6 +28,8 @@ class SheetManager
     puts "[Sheet 오류] write #{range}: #{e.message}"
   end
 
+  # ─── 운영 시트 (OPS) ─────────────────────────────────────────────
+
   def read_trigger
     rows = read("실행!A2:D2")
     return nil if rows.empty?
@@ -66,20 +68,24 @@ class SheetManager
     puts "[Sheet 오류] clear_corrections: #{e.message}"
   end
 
+  # 스탯: A=캐릭터명 B=건강 C=마법능력 D=내구도 E=민첩 F=기술 G=행운
+  #       H=스킬1 I=스킬2 J=facing K=기숙사 L=패시브선택
   def read_base_stats
-    rows = read("스탯!A2:J30")
+    rows = read("스탯!A2:L30")
     rows.map do |r|
       {
-        name:   r[0].to_s.strip,
-        hp:     r[1].to_i,
-        atk:    r[2].to_i,
-        dur:    r[3].to_i,
-        agi:    r[4].to_i,
-        tec:    r[5].to_i,
-        luck:   r[6].to_i,
-        skill1: r[7].to_s.strip,
-        skill2: r[8].to_s.strip,
-        facing: r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip
+        name:     r[0].to_s.strip,
+        hp:       r[1].to_i,
+        atk:      r[2].to_i,
+        dur:      r[3].to_i,
+        agi:      r[4].to_i,
+        tec:      r[5].to_i,
+        luck:     r[6].to_i,
+        skill1:   r[7].to_s.strip,
+        skill2:   r[8].to_s.strip,
+        facing:   r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip,
+        house:    r[10].to_s.strip,
+        passive:  r[11].to_s.strip.empty? ? '1' : r[11].to_s.strip
       }
     end.reject { |r| r[:name].empty? }
   end
@@ -96,6 +102,8 @@ class SheetManager
       }
     end.reject { |r| r[:name].empty? }
   end
+
+  # ─── 쿨타임 탭 ───────────────────────────────────────────────────
 
   def read_cooldowns
     rows = read("쿨타임!A2:C100")
@@ -130,6 +138,46 @@ class SheetManager
     puts "[Sheet 오류] write_cooldowns: #{e.message}"
   end
 
+  # ─── 버프 탭 ─────────────────────────────────────────────────────
+  # A=캐릭터명, B=종류, C=값, D=남은라운드수
+  # 남은라운드수 999 = 영구 (혼란 중첩 등 명시적으로 해제될 때까지 유지)
+
+  def read_buffs
+    rows = read("버프!A2:D200")
+    result = {}
+    rows.each do |r|
+      name = r[0].to_s.strip
+      type = r[1].to_s.strip
+      val  = r[2].to_s.strip
+      left = r[3].to_i
+      next if name.empty? || type.empty?
+      result[name] ||= []
+      result[name] << { type: type, value: val, left: left }
+    end
+    result
+  end
+
+  def write_buffs(buffs_hash)
+    rows = [['캐릭터명', '종류', '값', '남은라운드수']]
+    buffs_hash.each do |name, list|
+      list.each do |b|
+        rows << [name, b[:type], b[:value], b[:left]] if b[:left] > 0 || b[:left] == 999
+      end
+    end
+    blank = Array.new(200) { ['', '', '', ''] }
+    body_clear = Google::Apis::SheetsV4::ValueRange.new(values: blank)
+    @service.update_spreadsheet_value(@sheet_id, "버프!A2:D201", body_clear, value_input_option: 'RAW')
+    return if rows.size <= 1
+    body = Google::Apis::SheetsV4::ValueRange.new(values: rows[1..])
+    @service.update_spreadsheet_value(
+      @sheet_id, "버프!A2:D#{rows.size}", body, value_input_option: 'RAW'
+    )
+  rescue => e
+    puts "[Sheet 오류] write_buffs: #{e.message}"
+  end
+
+  # ─── 팀 시트 (A팀/B팀 각각 별도 시트) ──────────────────────────────
+
   def read_commands(team_name)
     tab  = "#{team_name}커맨드"
     rows = read("#{tab}!A2:I50")
@@ -160,14 +208,6 @@ class SheetManager
     end.compact
   end
 
-  def read_current_state_a
-    read_current_state('A팀')
-  end
-
-  def read_current_state_b
-    read_current_state('B팀')
-  end
-
   def update_current_state(states, team_name)
     tab  = "#{team_name}현황"
     rows = states.map { |s| [s[:name], s[:pos], s[:hp], s[:max_hp]] }
@@ -179,7 +219,18 @@ class SheetManager
     puts "[Sheet 오류] update_current_state: #{e.message}"
   end
 
-  def update_map(all_states)
+  # ─── 뷰 시트 (실시간 확인용) ────────────────────────────────────────
+
+  def health_bar(current, max)
+    return "0/0" if max.to_i <= 0
+    ratio  = current.to_f / max.to_f
+    filled = (ratio * 10).round
+    filled = [[filled, 10].min, 0].max
+    bar = ("█" * filled) + ("░" * (10 - filled))
+    "#{bar}  #{current}/#{max}"
+  end
+
+  def update_view_map(all_states)
     grid = Array.new(8) { Array.new(8, '') }
     all_states.each do |s|
       pos = s[:pos].to_s.strip
@@ -189,6 +240,16 @@ class SheetManager
       next if col < 0 || col > 7 || row < 0 || row > 7
       grid[row][col] = s[:name]
     end
-    write("맵!C2:J9", grid)
+    write("현황!C5:J12", grid)
+  end
+
+  def update_view_team(states, team_name)
+    range = team_name == 'A팀' ? "현황!O16:S23" : "현황!O28:S35"
+    rows = Array.new(8) { ['', '', '', '', ''] }
+    states.first(8).each_with_index do |s, i|
+      bar = health_bar(s[:hp], s[:max_hp])
+      rows[i] = [s[:name], s[:pos], bar, '', s[:max_hp]]
+    end
+    write(range, rows)
   end
 end
