@@ -2,3 +2,6 @@
 credentials.json
 battle_phase.json
 *.bak
+
+main.rb.bak_flow
+*.bak_flow
