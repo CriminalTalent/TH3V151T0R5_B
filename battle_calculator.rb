@@ -119,3 +119,38 @@ class BattleCalculator
     distance(from_pos, to_pos)
   end
 end
+
+class BattleCalculator
+  def self.hit_detail(attacker_tec)
+    rate = [[60 + attacker_tec.to_i, 0].max, 100].min
+    roll = rand(1..100)
+    success = roll <= rate
+    puts "[명중] 명중률 #{rate}% / 주사위 #{roll} → #{success ? '명중' : '빗나감'}"
+    { success: success, rate: rate, roll: roll }
+  end
+
+  def self.evade_detail(target_agi)
+    rate = [[target_agi.to_i * 2, 0].max, 100].min
+    return { success: false, rate: rate, roll: nil } if rate <= 0
+
+    roll = rand(1..100)
+    success = roll <= rate
+    puts "[회피] 회피율 #{rate}% / 주사위 #{roll} → #{success ? '회피' : '피격'}"
+    { success: success, rate: rate, roll: roll }
+  end
+
+  def self.critical_detail(luck)
+    rate = [[luck.to_i * 2, 0].max, 100].min
+    return { success: false, rate: rate, roll: nil } if rate <= 0
+
+    roll = rand(1..100)
+    success = roll <= rate
+    puts "[크리티컬] 크리티컬률 #{rate}% / 주사위 #{roll} → #{success ? '크리티컬!' : '일반'}"
+    { success: success, rate: rate, roll: roll }
+  end
+
+  def self.roll_text(label, detail)
+    return "#{label} #{detail[:rate]}%" if detail[:roll].nil?
+    "#{label} #{detail[:rate]}% / 주사위 #{detail[:roll]}"
+  end
+end

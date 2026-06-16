@@ -1,0 +1,4 @@
+.env
+credentials.json
+battle_phase.json
+*.bak
