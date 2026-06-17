@@ -1,5 +1,5 @@
 class TootBuilder
-  MAX_LENGTH = 980
+  MAX_LENGTH = 1000
 
   def initialize(round, team_name, is_first, log)
     @round     = round
@@ -25,7 +25,6 @@ class TootBuilder
       return [full_text]
     end
 
-    # 초과 시 섹션 단위로 분할
     toots = []
     current = header.dup
     sections.each do |sec|
