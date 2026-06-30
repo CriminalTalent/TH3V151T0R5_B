@@ -40,9 +40,9 @@ def announce_round(trigger, mastodon)
   
   mastodon.post_public(
     "[#{round}라운드 시작]\n\n" \
-    "A팀은 아래 시트에서 이동 좌표를 입력해주세요.\n" \
+    "A팀은 아래 시트의 그리드에 자신의 이름을 입력해주세요.\n" \
     "#{RUNNER_SHEET_URL}\n\n" \
-    "이동 좌표: A1~H8 중 선택\n" \
+    "위치: A1~H8 중 선택\n" \
     "크리쳐는 자동으로 공격합니다."
   )
 
@@ -54,7 +54,6 @@ def settle_round(phase, ops_sheet, runner_sheet, creature_sheet, view_sheet, mas
   puts "[전투봇] #{round}라운드 전체 정산 시작"
 
   base_stats = ops_sheet.read_base_stats
-  a_commands = runner_sheet.read_runner_commands
   a_state    = runner_sheet.read_runner_state
   
   creature_config = creature_sheet.read_creature_config
@@ -74,12 +73,23 @@ def settle_round(phase, ops_sheet, runner_sheet, creature_sheet, view_sheet, mas
   creature_state = { name: creature_name, hp: creature_base[:hp], pos: 'A1' }
   current_state = a_state + [creature_state]
 
+  a_commands = a_state.map do |s|
+    {
+      name:       s[:name],
+      move_to:    s[:pos],
+      action:     '이동',
+      targets:    [],
+      target_pos: '',
+      extra:      ''
+    }
+  end
+
   skill_data  = ops_sheet.read_skill_data
   corrections = ops_sheet.read_corrections
   cooldowns   = ops_sheet.read_cooldowns
   buffs_in    = ops_sheet.read_buffs
 
-  puts "[전투봇] A팀 #{a_state.size}명 / 크리쳐 #{creature_name} / 커맨드 #{a_commands.size}개"
+  puts "[전투봇] A팀 #{a_state.size}명 / 크리쳐 #{creature_name}"
 
   processor = BattleProcessor.new(
     base_stats, current_state, a_commands, skill_data, creature_base,
