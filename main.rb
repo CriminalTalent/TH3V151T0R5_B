@@ -22,7 +22,7 @@ creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
 view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
 listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
 
-puts "[전투봇] 초기화 완료"
+puts "[전투봇] 초기화 완료 - DM 대기 중"
 
 loop do
   sleep(30)
