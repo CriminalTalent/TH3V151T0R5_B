@@ -22,8 +22,11 @@ BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
 LOCATION_MAP = {
   '스토디시' => 'E7',
   'A' => 'A1', 'B' => 'B1', 'C' => 'C1', 'D' => 'D1',
-  'E' => 'E1', 'F' => 'F1', 'G' => 'G1', 'H' => 'H1'
+  'E' => 'E1', 'F' => 'F1', 'G' => 'G1'
 }
+
+ROUND_WAIT_SECONDS = 60
+ACTION_WAIT_SECONDS = 300
 
 puts "[전투봇] 시작"
 
@@ -56,6 +59,7 @@ def fetch_public_statuses
   uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/timelines/public?local=true")
   http = Net::HTTP.new(uri.host, uri.port)
   http.use_ssl = true
+  http.open_timeout = 10
   http.read_timeout = 10
 
   req = Net::HTTP::Get.new(uri)
@@ -74,6 +78,7 @@ def fetch_conversations
   uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/conversations")
   http = Net::HTTP.new(uri.host, uri.port)
   http.use_ssl = true
+  http.open_timeout = 10
   http.read_timeout = 10
 
   req = Net::HTTP::Get.new(uri)
@@ -88,19 +93,40 @@ rescue => e
   []
 end
 
-def runner_alive?(runner)
-  hp = runner[:hp] || runner[:health] || runner[:건강] || runner[:체력]
-  return true if hp.nil?
-  hp.to_i > 0
+def snapshot_current_dm_ids(processed_dm_ids)
+  fetch_conversations.each do |conv|
+    last_status = conv['last_status']
+    next unless last_status && last_status['id']
+
+    processed_dm_ids.add(last_status['id'])
+  end
 end
 
-def creature_alive?(creature)
-  hp = creature[:hp] || creature[:health] || creature[:건강] || creature[:체력]
-  return true if hp.nil?
-  hp.to_i > 0
+def current_creature(creature_sheet)
+  config = creature_sheet.read_creature_config || { name: '크리쳐' }
+  creature_sheet.read_creature_stats(config[:name]) || {
+    name: config[:name] || '크리쳐',
+    hp: 200,
+    max_hp: 200,
+    pos: 'D4'
+  }
 end
 
-def build_result_text(runner_tags, battle_round, creature_name, creature_hp, battle_actions, elapsed, timeout: false)
+def extract_usernames_from_status(status, content, bot_username)
+  usernames = status['mentions'].to_a.map { |m| m['username'].to_s.strip }.reject(&:empty?).uniq
+
+  if usernames.empty?
+    usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq
+  end
+
+  usernames.reject { |u| u == bot_username }.uniq
+end
+
+def build_result_text(runner_tags, battle_round, creature, battle_actions, elapsed, timeout: false)
+  creature_name = creature[:name] || creature[:이름] || '크리쳐'
+  creature_hp = creature[:hp] || 200
+  creature_max_hp = creature[:max_hp] || creature_hp
+
   title = timeout ? "[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)" : "[#{battle_round}라운드] #{creature_name} 전투 결과"
 
   result = "#{runner_tags}\n\n#{title}\n\n"
@@ -115,7 +141,7 @@ def build_result_text(runner_tags, battle_round, creature_name, creature_hp, bat
   end
 
   result += "───────────────────\n"
-  result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_hp}\n\n"
+  result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_max_hp}\n\n"
   result += timeout ? "전투 정산 완료! (5분)" : "전투 정산 완료! (#{elapsed}초)"
 
   result
@@ -123,13 +149,14 @@ end
 
 loop do
   begin
-    if auto_next_round_timer && (Time.now - auto_next_round_timer) >= 3
+    if auto_next_round_timer && (Time.now - auto_next_round_timer) >= ROUND_WAIT_SECONDS
       battle_round = battle_round.to_i + 1
       battle_active = true
       battle_announced = false
       battle_start_time = Time.now
       battle_actions = {}
       processed_messages = {}
+      snapshot_current_dm_ids(processed_dm_ids)
       auto_next_round_timer = nil
 
       puts "[전투봇] #{battle_round}라운드 자동 시작"
@@ -151,12 +178,7 @@ loop do
       content = clean_html(status['content'])
 
       if content.include?('[전투시작]') && !battle_active
-        usernames = status['mentions'].to_a.map { |m| m['username'] }.uniq
-        if usernames.empty?
-          usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq
-        end
-        usernames.reject! { |u| u == BOT_USERNAME }
-
+        usernames = extract_usernames_from_status(status, content, BOT_USERNAME)
         total_runners = usernames.size
 
         if total_runners == 0
@@ -175,11 +197,11 @@ loop do
         battle_round = content.match(/\[(\d+)\]/)&.[](1) || "1"
         battle_actions = {}
         processed_messages = {}
+        snapshot_current_dm_ids(processed_dm_ids)
         auto_next_round_timer = nil
 
-        creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
-        creature = creature_stats.first || {}
-        creature_name = creature[:name] || creature[:이름] || "크리쳐"
+        creature = current_creature(creature_sheet)
+        creature_name = creature[:name] || "크리쳐"
 
         puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{creature_name}"
 
@@ -203,11 +225,8 @@ loop do
 
     if battle_active
       unless battle_announced
-        runner_state = runner_sheet.read_runner_state
-        creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
-        creature = creature_stats.first || {}
-
-        creature_name = creature[:name] || creature[:이름] || "크리쳐"
+        creature = current_creature(creature_sheet)
+        creature_name = creature[:name] || "크리쳐"
 
         announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
                        "───────────────────\n" \
@@ -243,29 +262,25 @@ loop do
         next if processed_dm_ids.include?(dm_id)
 
         text = clean_html(last_status['content'])
-
-        unless text.match?(/\[(공격|회복|방어|이동)\/(.+?)\]/)
-          next
-        end
-
         match = text.match(/\[(공격|회복|방어|이동)\/(.+?)\]/)
+        next unless match
+
         action_type = match[1]
         action_target = match[2].strip
 
         if action_type == '이동'
           coord = LOCATION_MAP[action_target] || action_target
+          coord = coord.to_s.strip.upcase
 
-          runner_state = runner_sheet.read_runner_state
-          runner = runner_state.find { |r| r[:name] == username || r[:이름] == username }
+          runner_state = view_sheet.read_runner_state
+          runner = runner_state.find { |r| r[:name] == username }
 
           if runner
-            runner[:pos] = coord if runner.key?(:pos)
-            runner[:위치] = coord if runner.key?(:위치)
-
-            runner_sheet.update_runner_state([runner])
+            runner[:pos] = coord
+            view_sheet.update_runner_state(runner_state)
             puts "[전투봇] #{username} 이동 → #{coord}"
           else
-            puts "[전투봇] #{username} 이동 실패 - 러너 스탯에서 찾을 수 없음"
+            puts "[전투봇] #{username} 이동 실패 - 현황 시트에서 러너를 찾을 수 없음"
           end
         end
 
@@ -282,17 +297,12 @@ loop do
         listener.send_dm(username, "확인, 대기해주세요.")
 
         if battle_actions.size >= total_runners
-          creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
-          creature = creature_stats.first || {}
-
-          creature_name = creature[:name] || creature[:이름] || "크리쳐"
-          creature_hp = creature[:hp] || creature[:health] || creature[:건강] || creature[:체력] || 200
+          creature = current_creature(creature_sheet)
 
           result = build_result_text(
             runner_tags,
             battle_round,
-            creature_name,
-            creature_hp,
+            creature,
             battle_actions,
             (Time.now - battle_start_time).to_i,
             timeout: false
@@ -303,24 +313,19 @@ loop do
           battle_active = false
           auto_next_round_timer = Time.now
 
-          puts "[전투봇] 모든 러너 입력 완료 - 3초 후 다음라운드"
+          puts "[전투봇] 모든 러너 입력 완료 - #{ROUND_WAIT_SECONDS}초 후 다음라운드"
         end
       end
 
-      if battle_active && (Time.now - battle_start_time) >= 300
-        creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
-        creature = creature_stats.first || {}
-
-        creature_name = creature[:name] || creature[:이름] || "크리쳐"
-        creature_hp = creature[:hp] || creature[:health] || creature[:건강] || creature[:체력] || 200
+      if battle_active && (Time.now - battle_start_time) >= ACTION_WAIT_SECONDS
+        creature = current_creature(creature_sheet)
 
         result = build_result_text(
           runner_tags,
           battle_round,
-          creature_name,
-          creature_hp,
+          creature,
           battle_actions,
-          300,
+          ACTION_WAIT_SECONDS,
           timeout: true
         )
 
@@ -329,7 +334,7 @@ loop do
         battle_active = false
         auto_next_round_timer = Time.now
 
-        puts "[전투봇] #{battle_round}라운드 5분 경과 - 3초 후 다음라운드"
+        puts "[전투봇] #{battle_round}라운드 5분 경과 - #{ROUND_WAIT_SECONDS}초 후 다음라운드"
       end
     end
 
