@@ -1,3 +1,4 @@
+# battle_processor.rb
 require_relative 'battle_calculator'
 
 class BattleProcessor
@@ -9,21 +10,22 @@ class BattleProcessor
     name.to_s.strip.gsub(/\s+/, '')
   end
 
-  # cooldowns: { "캐릭터명" => { "스킬명" => 남은라운드 } }
-  # buffs_in:  { "캐릭터명" => [ { type:, value:, left: } ] }
-  def initialize(base_stats, current_states, commands, skill_data, corrections, cooldowns, buffs_in, round, team_name)
-    @base      = base_stats.each_with_object({}) { |s, h| h[s[:name]] = s }
-    @states    = current_states.each_with_object({}) { |s, h| h[s[:name]] = s.dup }
-    @cmds      = commands.each_with_object({}) { |c, h| h[c[:name]] = c }
-    @skills    = skill_data.each_with_object({}) { |s, h| h[self.class.normalize(s[:name])] = s }
-    @corr      = corrections
-    @cooldowns = cooldowns
-    @buffs_in  = buffs_in
-    @round     = round
-    @team_name = team_name
-    @log       = { support: [], move: [], attack: [], defense: [], result: [] }
-    @buffs     = {}
-    @passive_log = []
+  def initialize(base_stats, current_states, commands, skill_data, creature_base,
+                 corrections, cooldowns, buffs_in, round)
+    @base           = base_stats.each_with_object({}) { |s, h| h[s[:name]] = s }
+    @base[creature_base[:name]] = creature_base
+    @states         = current_states.each_with_object({}) { |s, h| h[s[:name]] = s.dup }
+    @cmds           = commands.each_with_object({}) { |c, h| h[c[:name]] = c }
+    @skills         = skill_data.each_with_object({}) { |s, h| h[self.class.normalize(s[:name])] = s }
+    @corr           = corrections
+    @cooldowns      = cooldowns
+    @buffs_in       = buffs_in
+    @round          = round
+    @creature_name  = creature_base[:name]
+    @log            = { support: [], move: [], attack: [], defense: [], result: [] }
+    @buffs          = {}
+    @attackers      = []
+    @passive_log    = []
     init_buffs
     apply_house_passives_pre
   end
@@ -34,6 +36,7 @@ class BattleProcessor
     process_support
     process_move
     process_attack
+    process_creature_attack
     process_defense
     apply_house_passives_post
     build_result_log
@@ -44,8 +47,19 @@ class BattleProcessor
 
   private
 
-  # ─── 미분류/쿨타임 행동 사전 로그 ─────────────────────────────────
-  # 입력된 행동이 스킬 시트에 없거나, 쿨타임 중이면 결과 툿에 명시
+  def is_creature?(name)
+    name == @creature_name
+  end
+
+  def is_player?(name)
+    !is_creature?(name)
+  end
+
+  def same_team?(name1, name2)
+    (is_creature?(name1) && is_creature?(name2)) ||
+    (is_player?(name1) && is_player?(name2))
+  end
+
   def log_unrecognized_or_cooldown_actions
     @cmds.each do |name, cmd|
       next unless @states[name]
@@ -80,8 +94,6 @@ class BattleProcessor
     end
   end
 
-  # ─── 초기화 ─────────────────────────────────────────────────────
-
   def init_buffs
     @states.each_key do |name|
       @buffs[name] = {
@@ -89,11 +101,11 @@ class BattleProcessor
         shield: 0, guardian: nil, guaranteed: false,
         indomitable: false, stunned: false, confused: 0,
         blinded: false, revenge_ready: false, defense_stance: false,
-        no_action_last_round: false, took_damage_last_round: false
+        no_action_last_round: false, took_damage_last_round: false,
+        took_damage_this_round: false
       }
     end
 
-    # 버프탭에서 지속 버프 복원
     @buffs_in.each do |name, list|
       next unless @buffs[name]
       list.each do |b|
@@ -112,8 +124,6 @@ class BattleProcessor
       end
     end
   end
-
-  # ─── 쿨타임 관리 ─────────────────────────────────────────────────
 
   def on_cooldown?(name, action)
     @cooldowns.dig(name, action).to_i > 0
@@ -148,32 +158,26 @@ class BattleProcessor
     result
   end
 
-  # ─── 버프(지속효과) 관리 ─────────────────────────────────────────
-  # 라운드 종료 시 버프탭에 기록할 내용을 만든다.
   def advance_buffs
     result = {}
 
     @states.each_key do |name|
       list = []
 
-      # 혼란 중첩은 영구 유지 (행동불가 처리 후에도 기록은 남김)
       if @buffs[name][:confused] > 0
         list << { type: '혼란중첩', value: @buffs[name][:confused], left: 999 }
       end
 
-      # 응원으로 받은 행운 증가 (2턴 지속) — 새로 부여된 경우만 버프탭에 새로 기록
       if @buffs[name][:new_luck_buff] && @buffs[name][:new_luck_buff] > 0
         list << { type: '행운증가', value: @buffs[name][:new_luck_buff], left: 2 }
       end
 
-      # 기존 행운증가 버프 지속시간 차감 후 유지
       @buffs_in[name]&.each do |b|
         next unless b[:type] == '행운증가'
         new_left = b[:left] - 1
         list << { type: '행운증가', value: b[:value], left: new_left } if new_left > 0
       end
 
-      # 슬리데린: 1회 행동 포기 → 다음 라운드부터 전투 종료까지 행운 +10 (영구)
       @buffs_in[name]&.each do |b|
         next unless b[:type] == '슬리데린행운'
         list << { type: '슬리데린행운', value: b[:value], left: 999 }
@@ -182,12 +186,10 @@ class BattleProcessor
         list << { type: '슬리데린행운', value: 10, left: 999 }
       end
 
-      # 이번 라운드 무행동 여부 기록 (다음 라운드 그리핀도르/래번클로/슬리데린 판정용)
       no_action = self.class.normalize(@cmds[name]&.dig(:action).to_s).empty? ||
                   self.class.normalize(@cmds[name]&.dig(:action).to_s) == '미행동'
       list << { type: '무행동기록', value: (no_action ? '1' : '0'), left: 999 }
 
-      # 이번 라운드 피격 여부 기록 (후플푸프용)
       took_damage = @buffs[name][:took_damage_this_round] ? '1' : '0'
       list << { type: '피격기록', value: took_damage, left: 999 }
 
@@ -197,7 +199,6 @@ class BattleProcessor
     result
   end
 
-  # ─── 기숙사 패시브: 라운드 시작 시 적용 (방어/공격 보정) ────────────
   def apply_house_passives_pre
     @states.each_key do |name|
       base = @base[name]
@@ -208,7 +209,6 @@ class BattleProcessor
       case house
       when '그리핀도르'
         if passive == '2'
-          # 2번: 현재 건강이 최대 건강의 50% 미만이면 마법능력 +50%
           max_hp = base[:hp]
           if max_hp > 0 && @states[name][:hp].to_f < max_hp * 0.5
             bonus = (base[:atk] * 0.5).ceil
@@ -216,11 +216,9 @@ class BattleProcessor
             @passive_log << "#{name}: [그리핀도르] 건강 50% 미만 — 마법능력 +#{bonus}"
           end
         end
-        # 1번(맞서는 용기)은 피격 시점에 거리 체크 필요 → process_attack에서 처리
 
       when '슬리데린'
         if passive == '1'
-          # 1번: 이전 라운드 건강 소모 없었으면 이번 라운드 마법능력 +50%
           took_damage = @buffs_in[name]&.any? { |b| b[:type] == '피격기록' && b[:value] == '1' }
           if @round > 1 && took_damage == false
             bonus = (base[:atk] * 0.5).ceil
@@ -228,11 +226,9 @@ class BattleProcessor
             @passive_log << "#{name}: [슬리데린] 이전 라운드 무피해 — 마법능력 +#{bonus}"
           end
         end
-        # 2번은 advance_buffs/무행동기록에서 처리 (이미 슬리데린행운으로 반영됨)
 
       when '래번클로'
         if passive == '1'
-          # 1번: 적이 상태이상을 가지고 있으면 마법능력 +50%
           enemy_has_status = @states.keys.any? do |ename|
             next false if same_team?(name, ename)
             @buffs[ename][:confused].to_i > 0 || @buffs[ename][:blinded] || @buffs[ename][:stunned]
@@ -243,12 +239,6 @@ class BattleProcessor
             @passive_log << "#{name}: [래번클로] 적 상태이상 감지 — 마법능력 +#{bonus}"
           end
         elsif passive == '2'
-          # 2번: 이전 라운드와 다른 분류 행동을 하면 기술 +10
-          prev_no_action = @buffs_in[name]&.find { |b| b[:type] == '무행동기록' }
-          # 분류 비교는 행동 분류(지원/공격/방어)를 저장해야 하나, 현재는
-          # 직전 라운드 행동명을 별도 저장하지 않으므로 무행동기록의 반대 상황만 체크.
-          # 간단화: 이전 라운드에 행동했고 이번 라운드도 행동한다면 +10 적용 (분류 추적은 추가 버프키 필요)
-          # → '행동분류기록'을 buffs_in에서 찾아 비교
           prev_category = @buffs_in[name]&.find { |b| b[:type] == '행동분류' }&.dig(:value)
           this_action   = self.class.normalize(@cmds[name]&.dig(:action).to_s)
           this_skill    = @skills[this_action]
@@ -261,7 +251,6 @@ class BattleProcessor
 
       when '후플푸프'
         if passive == '1'
-          # 1번: 이전 라운드 건강 소모되었으면 이번 라운드 내구도 +50%
           took_damage = @buffs_in[name]&.any? { |b| b[:type] == '피격기록' && b[:value] == '1' }
           if took_damage
             bonus = (base[:dur] * 0.5).ceil
@@ -269,7 +258,6 @@ class BattleProcessor
             @passive_log << "#{name}: [후플푸프] 이전 라운드 피격 — 내구도 +#{bonus}"
           end
         elsif passive == '2'
-          # 2번: 전투 중 1회, 체력 0 이하로 떨어지지 않음 (필사즉생과 유사하지만 자동)
           used = @buffs_in[name]&.any? { |b| b[:type] == '후플푸프사용' }
           unless used
             @buffs[name][:hufflepuff_guard] = true
@@ -284,18 +272,15 @@ class BattleProcessor
     end
   end
 
-  # ─── 기숙사 패시브: 라운드 종료 후 후처리 ────────────────────────
   def apply_house_passives_post
     @states.each_key do |name|
       base = @base[name]
       next unless base
       if base[:house] == '후플푸프' && base[:passive].to_s.strip == '2' && @buffs[name][:hufflepuff_guard] && @buffs[name][:used_hufflepuff_guard]
-        # 사용 기록을 버프탭에 영구 저장하기 위해 표시
         @buffs_in[name] ||= []
         @buffs_in[name] << { type: '후플푸프사용', value: '1', left: 999 }
       end
 
-      # 행동 분류 기록 (래번클로 2번용)
       action = self.class.normalize(@cmds[name]&.dig(:action).to_s)
       skill  = @skills[action]
       if skill
@@ -305,11 +290,6 @@ class BattleProcessor
     end
   end
 
-  def same_team?(name1, name2)
-    @cmds.key?(name1) && @cmds.key?(name2)
-  end
-
-  # ─── 보정 적용 ───────────────────────────────────────────────────
   def apply_corrections
     @corr.each do |c|
       name = c[:name]
@@ -328,27 +308,6 @@ class BattleProcessor
         @states[name][:hp] = @base[name]&.dig(:hp) || 50
         @states[name][:pos] = c[:value] unless c[:value].empty?
         @log[:support] << "#{name}: #{c[:value]}에 부활"
-      when '보스반격'
-        dmg = c[:value].to_i
-        next if dmg <= 0
-
-        candidates = @states.select do |target_name, state|
-          state[:hp].to_i > 0 && !same_team?(name, target_name)
-        end.keys
-
-        count = candidates.empty? ? 0 : rand(0..candidates.size)
-        targets = candidates.sample(count)
-
-        if targets.empty?
-          @log[:attack] << "#{name} → [보스반격]: 대상 없음"
-        else
-          targets.each do |target_name|
-            @states[target_name][:hp] = [@states[target_name][:hp] - dmg, 0].max
-            @buffs[target_name][:took_damage_this_round] = true if @buffs[target_name]
-            @log[:attack] << "#{name} → [보스반격] #{target_name}: 피해 #{dmg} (건강 #{@states[target_name][:hp]})"
-          end
-        end
-
       when '쿨타임초기화'
         target_skill = c[:value].to_s.strip
         if target_skill.empty?
@@ -362,7 +321,6 @@ class BattleProcessor
     end
   end
 
-  # ─── 지원 처리 ───────────────────────────────────────────────────
   def process_support
     @cmds.each do |name, cmd|
       next unless @states[name]
@@ -478,7 +436,6 @@ class BattleProcessor
     end
   end
 
-  # ─── 이동 처리 ───────────────────────────────────────────────────
   def process_move
     occupied = {}
     @states.each_value do |s|
@@ -491,9 +448,6 @@ class BattleProcessor
       next if @states[name][:hp] <= 0
       action = self.class.normalize(cmd[:action].to_s)
       next if action == '습격'
-
-      # 슬리데린 2번: 1회 행동 포기(미행동)는 process_support/이동/공격에서 모두 스킵되며,
-      # advance_buffs에서 무행동기록을 통해 다음 라운드 행운+10 부여
 
       if action == '순간이동'
         t    = cmd[:targets].first
@@ -522,7 +476,6 @@ class BattleProcessor
         next
       end
 
-      # 같은 칸 중복 배치 체크 (아군만 제한, 적과는 겹침 허용)
       target_occupant = @states.find { |n, s| n != name && s[:pos].to_s.strip == to && s[:hp] > 0 }
       if target_occupant && same_team?(name, target_occupant[0])
         @log[:move] << "#{name}: 이동 불가 — #{to}에 #{target_occupant[0]} 위치"
@@ -536,7 +489,6 @@ class BattleProcessor
     end
   end
 
-  # ─── 공격 처리 ───────────────────────────────────────────────────
   def process_attack
     @cmds.each do |name, cmd|
       next unless @states[name]
@@ -578,6 +530,10 @@ class BattleProcessor
       targets.each do |tname|
         next unless @states[tname]
         next if @states[tname][:hp] <= 0
+
+        if is_creature?(tname)
+          @attackers << name unless @attackers.include?(name)
+        end
 
         tgt_state = @states[tname]
         tgt_base  = @base[tname]
@@ -658,7 +614,6 @@ class BattleProcessor
           action, caster_atk, is_critical: is_crit, extra_params: extra_params
         )
 
-        # 희생 처리
         actual_target = tname
         if @buffs[tname][:guardian]
           guardian = @buffs[tname][:guardian]
@@ -670,8 +625,6 @@ class BattleProcessor
 
         tgt_dur_final = ((@base[actual_target]&.dig(:dur) || 0) + @buffs[actual_target][:dur_up]).to_i
 
-        # 그리핀도르 1번: 공격자(name)가 actual_target의 머리방향 전방 1마스에 있다면
-        # actual_target의 내구도 +50% (적이 자신을 등지고 있을 때 받는 피해 감소)
         tgt_house   = @base[actual_target]&.dig(:house)
         tgt_passive = @base[actual_target]&.dig(:passive).to_s.strip
         if tgt_house == '그리핀도르' && tgt_passive == '1'
@@ -685,7 +638,6 @@ class BattleProcessor
         effective_dur = @buffs[actual_target][:defense_stance] ? (tgt_dur_final * 1.5).ceil : tgt_dur_final
         dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
 
-        # 후플푸프 2번: 전투 중 1회 체력 0 이하 방지
         if @buffs[actual_target][:hufflepuff_guard] && @states[actual_target][:hp] - dmg <= 0
           dmg = @states[actual_target][:hp] - 1
           @buffs[actual_target][:used_hufflepuff_guard] = true
@@ -746,7 +698,137 @@ class BattleProcessor
     end
   end
 
-  # ─── 방어 처리 ───────────────────────────────────────────────────
+  def process_creature_attack
+    creature = @states[@creature_name]
+    return if creature[:hp] <= 0
+    return if @attackers.empty?
+
+    base = @base[@creature_name]
+    skill = @skills[self.class.normalize(base[:skill1])]
+
+    caster_atk  = base[:atk]
+    caster_tec  = base[:tec]
+    caster_luck = base[:luck]
+    caster_pos  = creature[:pos]
+
+    targets = @states.select { |name, s| is_player?(name) && s[:hp] > 0 }.keys
+
+    targets.each do |tname|
+      tgt_state = @states[tname]
+      tgt_base  = @base[tname]
+      next unless tgt_base
+
+      tgt_pos = tgt_state[:pos]
+      rng = skill ? skill[:range] : '-'
+
+      unless BattleCalculator.in_range?(rng, caster_pos, tgt_pos)
+        @log[:attack] << "[크리쳐] #{@creature_name} → [#{base[:skill1]}] #{tname}: 사거리 밖"
+        next
+      end
+
+      if @buffs[tname]&.dig(:stunned)
+        @log[:attack] << "[크리쳐] #{@creature_name} → [#{base[:skill1]}] #{tname}: 행동 불가 상태"
+        next
+      end
+
+      tgt_agi = (tgt_base[:agi] + @buffs[tname][:agi_up]).to_i
+
+      hit_detail = BattleCalculator.hit_detail(caster_tec)
+      unless hit_detail[:success]
+        @log[:attack] << "[크리쳐] #{@creature_name} → [#{base[:skill1]}] #{tname}: 빗나감"
+        next
+      end
+
+      evade_detail = BattleCalculator.evade_detail(tgt_agi)
+      if evade_detail[:success]
+        @log[:attack] << "[크리쳐] #{@creature_name} → [#{base[:skill1]}] #{tname}: 회피"
+        next
+      end
+
+      crit_detail = BattleCalculator.critical_detail(caster_luck)
+      is_crit = crit_detail[:success]
+
+      raw_dmg = BattleCalculator.calc_skill_damage(
+        base[:skill1], caster_atk, is_critical: is_crit, extra_params: {}
+      )
+
+      tgt_dur = (tgt_base[:dur] + @buffs[tname][:dur_up]).to_i
+      effective_dur = @buffs[tname][:defense_stance] ? (tgt_dur * 1.5).ceil : tgt_dur
+      dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
+
+      if @buffs[tname][:shield] > 0
+        absorbed = [@buffs[tname][:shield], dmg].min
+        @buffs[tname][:shield] -= absorbed
+        dmg -= absorbed
+      end
+
+      @states[tname][:hp] = [@states[tname][:hp] - dmg, 0].max
+      @buffs[tname][:took_damage_this_round] = true if dmg > 0
+
+      crit_str = is_crit ? ' (크리티컬!)' : ''
+      @log[:attack] << "[크리쳐] #{@creature_name} → [#{base[:skill1]}] #{tname}: 명중#{crit_str} / 피해 #{dmg} (건강 #{@states[tname][:hp]})"
+
+      @log[:result] << "#{tname}: 건강 0 — 전투 불능." if @states[tname][:hp] <= 0
+    end
+
+    creature_counter_attack
+  end
+
+  def creature_counter_attack
+    return if @attackers.empty?
+
+    creature = @states[@creature_name]
+    base = @base[@creature_name]
+
+    target = @attackers.sample
+    tgt_state = @states[target]
+    tgt_base = @base[target]
+
+    return unless tgt_state && tgt_base
+
+    skill = @skills[self.class.normalize(base[:skill2])]
+    caster_atk = base[:atk]
+    caster_tec = base[:tec]
+    caster_luck = base[:luck]
+
+    hit_detail = BattleCalculator.hit_detail(caster_tec)
+    unless hit_detail[:success]
+      @log[:defense] << "[크리쳐 반격] #{@creature_name} → #{target}: 빗나감"
+      return
+    end
+
+    tgt_agi = (tgt_base[:agi] + @buffs[target][:agi_up]).to_i
+    evade_detail = BattleCalculator.evade_detail(tgt_agi)
+    if evade_detail[:success]
+      @log[:defense] << "[크리쳐 반격] #{@creature_name} → #{target}: 회피"
+      return
+    end
+
+    crit_detail = BattleCalculator.critical_detail(caster_luck)
+    is_crit = crit_detail[:success]
+
+    raw_dmg = BattleCalculator.calc_skill_damage(
+      base[:skill2], caster_atk, is_critical: is_crit, extra_params: {}
+    )
+
+    tgt_dur = (tgt_base[:dur] + @buffs[target][:dur_up]).to_i
+    dmg = BattleCalculator.calc_damage(raw_dmg, tgt_dur)
+
+    if @buffs[target][:shield] > 0
+      absorbed = [@buffs[target][:shield], dmg].min
+      @buffs[target][:shield] -= absorbed
+      dmg -= absorbed
+    end
+
+    @states[target][:hp] = [@states[target][:hp] - dmg, 0].max
+    @buffs[target][:took_damage_this_round] = true if dmg > 0
+
+    crit_str = is_crit ? ' (크리티컬!)' : ''
+    @log[:defense] << "[크리쳐 반격] #{@creature_name} → [#{base[:skill2]}] #{target}: 명중#{crit_str} / 피해 #{dmg} (건강 #{@states[target][:hp]})"
+
+    @log[:result] << "#{target}: 건강 0 — 전투 불능." if @states[target][:hp] <= 0
+  end
+
   def process_defense
     @cmds.each do |name, cmd|
       next unless @states[name]
@@ -808,8 +890,6 @@ class BattleProcessor
     end
   end
 
-  # ─── 슬리데린 2번 처리 (미행동 시 다음 라운드부터 행운+10 부여 예약) ──
-  # process 흐름 안에서 advance_buffs 직전에 호출되도록 build_result_log에서 처리
   def mark_slytherin_skip(name)
     base = @base[name]
     return unless base
@@ -822,7 +902,6 @@ class BattleProcessor
     end
   end
 
-  # ─── 결과 로그 ───────────────────────────────────────────────────
   def build_result_log
     @states.each_key do |name|
       mark_slytherin_skip(name)
