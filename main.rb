@@ -180,13 +180,20 @@ loop do
               creature_name = creature_config[:name] || "크리쳐"
               
               result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과\n\n"
+              result += "───────────────────\n"
               battle_actions.each do |username, action|
                 result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
               end
+              result += "───────────────────"
               
               parent_id = listener.post_public(result)
               sleep(1)
-              listener.reply_public(parent_id, "전투 정산 완료!")
+              
+              detailed = "#{creature_name} 현재 상태: 건강 100/200\n" \
+                         "전투 정산 완료!\n\n" \
+                         "[다음 라운드 대기 중...]\n" \
+                         "GM의 [전투시작] 명령을 기다리는 중"
+              listener.reply_public(parent_id, detailed)
               
               battle_active = false
               puts "[전투봇] 모든 러너 입력 완료 - 전투 진행"
@@ -201,13 +208,20 @@ loop do
         creature_name = creature_config[:name] || "크리쳐"
         
         result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)\n\n"
+        result += "───────────────────\n"
         battle_actions.each do |username, action|
           result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
         end
+        result += "───────────────────"
         
         parent_id = listener.post_public(result)
         sleep(1)
-        listener.reply_public(parent_id, "전투 정산 완료!")
+        
+        detailed = "#{creature_name} 현재 상태: 건강 100/200\n" \
+                   "전투 정산 완료!\n\n" \
+                   "[다음 라운드 대기 중...]\n" \
+                   "GM의 [전투시작] 명령을 기다리는 중"
+        listener.reply_public(parent_id, detailed)
         
         battle_active = false
         battle_actions = {}
