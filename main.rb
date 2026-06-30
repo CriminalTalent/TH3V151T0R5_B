@@ -6,6 +6,7 @@ require 'json'
 require 'time'
 require 'net/http'
 require 'uri'
+require 'set'
 
 Dotenv.load(File.join(__dir__, '.env'))
 
@@ -16,6 +17,7 @@ RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
 CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
 VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
+BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
 
 LOCATION_MAP = {
   '스토디시' => 'E7',
@@ -55,39 +57,45 @@ loop do
       auto_next_round_timer = nil
       puts "[전투봇] #{battle_round}라운드 자동 시작"
     end
-    
+
     uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/timelines/public?local=true")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
     http.read_timeout = 10
-    
+
     req = Net::HTTP::Get.new(uri)
     req['Authorization'] = "Bearer #{ENV['BATTLE_TOKEN']}"
-    
+
     res = http.request(req)
     next if res.code != '200'
-    
+
     statuses = JSON.parse(res.body)
-    
+
     statuses.each do |status|
       status_id = status['id']
       next if processed_statuses.include?(status_id)
-      
+
+      account_username = status.dig('account', 'username')
+      if account_username == BOT_USERNAME
+        processed_statuses.add(status_id)
+        next
+      end
+
       content = status['content'].gsub(/<[^>]*>/, '')
-      
+
       if content.include?('[전투시작]') && !battle_active
         usernames = content.scan(/@(\w+)/).flatten.uniq
         total_runners = usernames.size
-        
+
         if total_runners == 0
-          listener.post_public("[전투시작] 참여자가 없습니다. 태그를 추가하세요.")
+          listener.post_public("[전투 오류] 참여자가 없습니다. 태그를 추가하세요.")
           puts "[전투봇] 태그된 러너 없음"
           processed_statuses.add(status_id)
           next
         end
-        
+
         runner_tags = usernames.map { |u| "@#{u}" }.join(" ")
-        
+
         battle_active = true
         battle_announced = false
         battle_start_time = Time.now
@@ -95,30 +103,35 @@ loop do
         battle_actions = {}
         processed_messages = {}
         auto_next_round_timer = nil
-        
+
         creature_stats = creature_sheet.read_creature_stats
         creature_name = creature_stats.first&.dig(:name) || "크리쳐"
-        
+
         puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{usernames.join(', ')}), 상대: #{creature_name}"
-        
+
         processed_statuses.add(status_id)
+
       elsif content.include?('[전투종료]')
         battle_active = false
         battle_actions = {}
         processed_messages = {}
         battle_announced = false
         auto_next_round_timer = nil
+
         listener.post_public("[전투 강제 종료]")
         puts "[전투봇] 전투 종료"
+
+        processed_statuses.add(status_id)
+      else
         processed_statuses.add(status_id)
       end
     end
-    
+
     if battle_active
-      if !battle_announced
+      unless battle_announced
         creature_stats = creature_sheet.read_creature_stats
         creature_name = creature_stats.first&.dig(:name) || "크리쳐"
-        
+
         announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
                        "───────────────────\n" \
                        "DM으로 행동을 입력해주세요.\n\n" \
@@ -129,78 +142,82 @@ loop do
                        "  [이동/좌표]\n\n" \
                        "입력 대기: 5분\n" \
                        "───────────────────"
-        
+
         listener.post_public(announcement)
         battle_announced = true
         puts "[전투봇] #{battle_round}라운드 안내 송출"
       end
-      
+
       conv_uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/conversations")
       conv_http = Net::HTTP.new(conv_uri.host, conv_uri.port)
       conv_http.use_ssl = true
       conv_http.read_timeout = 10
-      
+
       conv_req = Net::HTTP::Get.new(conv_uri)
       conv_req['Authorization'] = "Bearer #{ENV['BATTLE_TOKEN']}"
-      
+
       conv_res = conv_http.request(conv_req)
       next if conv_res.code != '200'
-      
+
       conversations = JSON.parse(conv_res.body)
-      
+
       conversations.each do |conv|
         sender = conv['accounts'].first
         next unless sender
-        
+
         username = sender['username']
-        
+
         if conv['last_status']
-          status_id = conv['last_status']['id']
           next if processed_messages[username]
-          
+
           text = conv['last_status']['content'].gsub(/<[^>]*>/, '')
-          
+
           if text.match?(/\[(공격|회복|방어|이동)\/(.*?)\]/)
             match = text.match(/\[(공격|회복|방어|이동)\/(.*?)\]/)
             action_type = match[1]
             action_target = match[2].strip
-            
+
             if action_type == '이동'
-              coord = action_target
-              coord = LOCATION_MAP[coord] if LOCATION_MAP[coord]
-              
+              coord = LOCATION_MAP[action_target] || action_target
+
               runner_state = runner_sheet.read_runner_state
               runner = runner_state.find { |r| r[:name] == username }
-              
+
               if runner
                 runner[:pos] = coord
                 runner_sheet.update_runner_state([runner])
                 puts "[전투봇] #{username} 이동 → #{coord}"
               end
             end
-            
-            battle_actions[username] = { type: action_type, target: action_target }
+
+            battle_actions[username] = {
+              type: action_type,
+              target: action_target
+            }
+
             puts "[전투봇] #{username} → [#{action_type}/#{action_target}]"
-            
+
             listener.send_dm(username, "확인, 대기해주세요.")
             processed_messages[username] = true
-            
+
             if battle_actions.size >= total_runners
               creature_stats = creature_sheet.read_creature_stats
               creature_name = creature_stats.first&.dig(:name) || "크리쳐"
               creature_hp = creature_stats.first&.dig(:hp) || 200
-              
+
               result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과\n\n"
               result += "───────────────────\n"
-              battle_actions.each do |username, action|
-                result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
+
+              battle_actions.each do |name, action|
+                result += "#{name}: [#{action[:type]}/#{action[:target]}]\n"
               end
+
               result += "───────────────────\n"
               result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_hp}\n\n"
               result += "전투 정산 완료! (#{(Time.now - battle_start_time).to_i}초)"
-              
+
               listener.post_public(result)
-              
+
               battle_active = false
               auto_next_round_timer = Time.now
               puts "[전투봇] 모든 러너 입력 완료 - 3초 후 다음라운드"
@@ -208,32 +225,35 @@ loop do
           end
         end
       end
-      
+
       if (Time.now - battle_start_time) >= 300
         creature_stats = creature_sheet.read_creature_stats
         creature_name = creature_stats.first&.dig(:name) || "크리쳐"
         creature_hp = creature_stats.first&.dig(:hp) || 200
-        
+
         result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)\n\n"
         result += "───────────────────\n"
-        battle_actions.each do |username, action|
-          result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
+
+        battle_actions.each do |name, action|
+          result += "#{name}: [#{action[:type]}/#{action[:target]}]\n"
         end
+
         result += "───────────────────\n"
         result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_hp}\n\n"
         result += "전투 정산 완료! (5분)"
-        
+
         listener.post_public(result)
-        
+
         battle_active = false
         auto_next_round_timer = Time.now
         puts "[전투봇] #{battle_round}라운드 5분 경과 - 3초 후 다음라운드"
       end
     end
-    
+
   rescue => e
     puts "[전투봇 오류] #{e.class}: #{e.message}"
+    puts e.backtrace.first(5)
   end
-  
+
   sleep(10)
 end
