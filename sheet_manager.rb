@@ -29,43 +29,6 @@ class SheetManager
     puts "[Sheet 오류] write #{range}: #{e.message}"
   end
 
-  def read_trigger
-    rows = read("실행!A2:D2")
-    return nil if rows.empty?
-    row = rows[0]
-    {
-      on:    row[0].to_s.upcase == 'TRUE',
-      round: row[1].to_i,
-      team:  'A팀'
-    }
-  end
-
-  def turn_off_trigger
-    write("실행!A2", [['FALSE']])
-  end
-
-  def read_corrections
-    rows = read("보정!A2:E50")
-    rows.select { |r| r[3].to_s.upcase == 'TRUE' }.map do |r|
-      { name: r[0].to_s.strip, type: r[1].to_s.strip,
-        value: r[2].to_s.strip, memo: r[4].to_s.strip }
-    end
-  end
-
-  def clear_corrections
-    rows = read("보정!A2:E50")
-    return if rows.empty?
-    updates = rows.map do |r|
-      r[3].to_s.upcase == 'TRUE' ? [r[0], r[1], r[2], 'FALSE', r[4]] : r
-    end
-    body = Google::Apis::SheetsV4::ValueRange.new(values: updates)
-    @service.update_spreadsheet_value(
-      @sheet_id, "보정!A2:E#{updates.size + 1}", body, value_input_option: 'RAW'
-    )
-  rescue => e
-    puts "[Sheet 오류] clear_corrections: #{e.message}"
-  end
-
   def read_base_stats
     rows = read("스탯!B2:K30")
     rows.map do |r|
@@ -97,6 +60,23 @@ class SheetManager
         desc:     r[4].to_s.strip
       }
     end.reject { |r| r[:name].empty? }
+  end
+
+  def read_battle_state
+    rows = read("전투상태!A2:C2")
+    return nil if rows.empty?
+    row = rows[0]
+    {
+      round: row[0].to_i,
+      status: row[1].to_s.strip,
+      timestamp: row[2].to_s.strip
+    }
+  rescue
+    nil
+  end
+
+  def write_battle_state(round, status)
+    write("전투상태!A2:C2", [[round, status, Time.now.to_s]])
   end
 
   def read_cooldowns
