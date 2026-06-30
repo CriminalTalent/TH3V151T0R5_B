@@ -50,23 +50,4 @@ class MastodonClient
     puts "[Mastodon 오류] #{e.message}"
     nil
   end
-
-  def send_dm(username, text)
-    uri = URI("#{@base_url}/api/v1/statuses")
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = true
-
-    req = Net::HTTP::Post.new(uri)
-    req['Authorization'] = "Bearer #{@token}"
-    req['Content-Type'] = 'application/json'
-    req.body = { status: "@#{username} #{text}", visibility: 'direct' }.to_json
-
-    res = http.request(req)
-    data = JSON.parse(res.body)
-    puts "[Mastodon] DM 전송: @#{username}"
-    data['id']
-  rescue => e
-    puts "[Mastodon 오류] DM 전송 실패: #{e.message}"
-    nil
-  end
 end
