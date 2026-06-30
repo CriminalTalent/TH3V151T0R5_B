@@ -152,3 +152,105 @@ class SheetManager
   def write_buffs(buffs_hash)
     rows = [['캐릭터명', '종류', '값', '남은라운드수']]
     buffs_hash.each do |name, list|
+      list.each do |b|
+        rows << [name, b[:type], b[:value], b[:left]] if b[:left] > 0 || b[:left] == 999
+      end
+    end
+    blank = Array.new(200) { ['', '', '', ''] }
+    body_clear = Google::Apis::SheetsV4::ValueRange.new(values: blank)
+    @service.update_spreadsheet_value(@sheet_id, "버프!A2:D201", body_clear, value_input_option: 'RAW')
+    return if rows.size <= 1
+    body = Google::Apis::SheetsV4::ValueRange.new(values: rows[1..])
+    @service.update_spreadsheet_value(
+      @sheet_id, "버프!A2:D#{rows.size}", body, value_input_option: 'RAW'
+    )
+  rescue => e
+    puts "[Sheet 오류] write_buffs: #{e.message}"
+  end
+
+  # ─── 러너 시트 (RUNNER_SHEET_ID) ──────────────────────────────────
+
+  def read_runner_commands
+    rows = read("커맨드!A2:I50")
+    rows.map do |r|
+      next if r[0].to_s.strip.empty?
+      {
+        name:       r[0].to_s.strip,
+        move_to:    r[1].to_s.strip,
+        action:     r[2].to_s.strip,
+        targets:    [r[3], r[4], r[5], r[6], r[7]].map { |t| t.to_s.strip }.reject(&:empty?),
+        target_pos: r[8].to_s.strip,
+        extra:      ''
+      }
+    end.compact
+  end
+
+  def read_runner_state
+    rows = read("현황!A2:D50")
+    rows.map do |r|
+      next if r[0].to_s.strip.empty?
+      {
+        name:   r[0].to_s.strip,
+        pos:    r[1].to_s.strip,
+        hp:     r[2].to_i,
+        max_hp: r[3].to_i
+      }
+    end.compact
+  end
+
+  def update_runner_state(states)
+    rows = states.map { |s| [s[:name], s[:pos], s[:hp], s[:max_hp]] }
+    body = Google::Apis::SheetsV4::ValueRange.new(values: rows)
+    @service.update_spreadsheet_value(
+      @sheet_id, "현황!A2:D#{rows.size + 1}", body, value_input_option: 'RAW'
+    )
+  rescue => e
+    puts "[Sheet 오류] update_runner_state: #{e.message}"
+  end
+
+  # ─── 크리쳐 시트 (CREATURE_SHEET_ID) ───────────────────────────────
+
+  def read_creature_config
+    rows = read("보스!A2:E30")
+    rows.each do |r|
+      next if r[4].to_s.upcase != 'TRUE'
+      return {
+        name:  r[1].to_s.strip,
+        credit: r[2].to_i,
+        item:  r[3].to_s.strip
+      }
+    end
+    nil
+  end
+
+  def read_creature_stats(creature_name)
+    rows = read("스탯!A2:M30")
+    rows.each do |r|
+      next if r[1].to_s.strip != creature_name
+      return {
+        name:   creature_name,
+        hp:     r[4].to_i,
+        dur:    r[5].to_i,
+        atk:    r[6].to_i,
+        agi:    r[7].to_i,
+        tec:    r[8].to_i,
+        luck:   r[9].to_i,
+        skill1: r[10].to_s.strip,
+        skill2: r[11].to_s.strip,
+        facing: r[12].to_s.strip.empty? ? '하' : r[12].to_s.strip
+      }
+    end
+    nil
+  end
+
+  def update_creature_state(state)
+    rows = read("현황!A2:D50")
+    rows[0] = [state[:name], state[:pos], state[:hp], state[:max_hp]]
+    body = Google::Apis::SheetsV4::ValueRange.new(values: rows)
+    @service.update_spreadsheet_value(
+      @sheet_id, "현황!A2:D#{rows.size + 1}", body, value_input_option: 'RAW'
+    )
+  rescue => e
+    puts "[Sheet 오류] update_creature_state: #{e.message}"
+  end
+end
