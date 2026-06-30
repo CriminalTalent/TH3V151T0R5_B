@@ -151,7 +151,8 @@ loop do
       content = clean_html(status['content'])
 
       if content.include?('[전투시작]') && !battle_active
-        usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq
+        usernames = status['mentions'].to_a.map { |m| m['username'] }.uniq
+        usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq if usernames.empty()
         usernames.reject! { |u| u == BOT_USERNAME }
 
         total_runners = usernames.size
@@ -174,7 +175,7 @@ loop do
         processed_messages = {}
         auto_next_round_timer = nil
 
-        creature_stats = creature_sheet.read_creature_stats
+        creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
         creature = creature_stats.first || {}
         creature_name = creature[:name] || creature[:이름] || "크리쳐"
 
@@ -201,7 +202,7 @@ loop do
     if battle_active
       unless battle_announced
         runner_state = runner_sheet.read_runner_state
-        creature_stats = creature_sheet.read_creature_stats
+        creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
         creature = creature_stats.first || {}
 
         creature_name = creature[:name] || creature[:이름] || "크리쳐"
@@ -279,7 +280,7 @@ loop do
         listener.send_dm(username, "확인, 대기해주세요.")
 
         if battle_actions.size >= total_runners
-          creature_stats = creature_sheet.read_creature_stats
+          creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
           creature = creature_stats.first || {}
 
           creature_name = creature[:name] || creature[:이름] || "크리쳐"
@@ -305,7 +306,7 @@ loop do
       end
 
       if battle_active && (Time.now - battle_start_time) >= 300
-        creature_stats = creature_sheet.read_creature_stats
+        creature_stats = creature_sheet.read_creature_stats(creature_sheet.read_creature_config[:name])
         creature = creature_stats.first || {}
 
         creature_name = creature[:name] || creature[:이름] || "크리쳐"
