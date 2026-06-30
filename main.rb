@@ -79,7 +79,7 @@ loop do
       
       if content.include?('[전투시작]') && !battle_active
         mentions = status['mentions']
-        usernames = mentions.map { |m| m['acct'] }.select { |u| u != 'DOWN' && !u.empty? }
+        usernames = mentions.map { |m| m['acct'] }.select { |u| !u.empty? }
         total_runners = usernames.size
         
         if total_runners == 0
@@ -157,7 +157,6 @@ loop do
         next unless sender
         
         username = sender['username']
-        next if username == 'DOWN'
         
         if conv['last_status']
           status_id = conv['last_status']['id']
@@ -190,7 +189,6 @@ loop do
             listener.send_dm(username, "확인, 대기해주세요.")
             processed_messages[username] = true
             
-            # 모든 러너가 입력했으면 전투 진행
             if battle_actions.size >= total_runners
               creature_stats = creature_sheet.read_creature_stats
               creature_name = creature_stats.first&.dig(:name) || "크리쳐"
@@ -215,7 +213,6 @@ loop do
         end
       end
       
-      # 5분 경과 체크
       if (Time.now - battle_start_time) >= 300
         creature_stats = creature_sheet.read_creature_stats
         creature_name = creature_stats.first&.dig(:name) || "크리쳐"
