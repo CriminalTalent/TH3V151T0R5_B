@@ -37,6 +37,7 @@ battle_active = false
 battle_actions = {}
 battle_start_time = nil
 battle_round = nil
+processed_messages = {}
 
 loop do
   begin
@@ -64,6 +65,7 @@ loop do
         battle_start_time = Time.now
         battle_round = content.match(/\[(\d+)\]/)&.[](1) || "1"
         battle_actions = {}
+        processed_messages = {}
         
         mentions = status['mentions']
         usernames = mentions.map { |m| "@#{m['acct']}" }.reject { |u| u == '@DOWN' }.join(" ")
@@ -78,6 +80,7 @@ loop do
       elsif content.include?('[전투종료]')
         battle_active = false
         battle_actions = {}
+        processed_messages = {}
         listener.post_public("[전투 강제 종료]")
         puts "[전투봇] 전투 종료"
         last_status_id = status['id']
@@ -107,6 +110,9 @@ loop do
         next if username == 'DOWN'
         
         if conv['last_status']
+          status_id = conv['last_status']['id']
+          next if processed_messages[username] == status_id
+          
           text = conv['last_status']['content'].gsub(/<[^>]*>/, '')
           
           if text.match?(/\[(공격|회복|방어|이동)\/(.*?)\]/)
@@ -130,6 +136,9 @@ loop do
             
             battle_actions[username] = { type: action_type, target: action_target }
             puts "[전투봇] #{username} → [#{action_type}/#{action_target}]"
+            
+            listener.send_dm(username, "확인, 대기해주세요.")
+            processed_messages[username] = status_id
           end
         end
       end
@@ -139,6 +148,7 @@ loop do
         listener.post_public("[#{battle_round}라운드 자동 정산]\n\n입력: #{battle_actions.size}명\n\n정산 완료!")
         battle_active = false
         battle_actions = {}
+        processed_messages = {}
         puts "[전투봇] #{battle_round}라운드 5분 경과 - 자동 정산"
       end
     end
