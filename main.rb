@@ -40,6 +40,7 @@ battle_round = nil
 processed_messages = {}
 battle_announced = false
 total_runners = 0
+runner_tags = ""
 
 loop do
   begin
@@ -63,16 +64,25 @@ loop do
       content = status['content'].gsub(/<[^>]*>/, '')
       
       if content.include?('[전투시작]') && !battle_active
+        mentions = status['mentions']
+        usernames = mentions.select { |m| m['acct'] != 'DOWN' }
+        total_runners = usernames.size
+        
+        if total_runners == 0
+          listener.post_public("[전투시작] 참여자가 없습니다. 태그를 추가하세요.")
+          puts "[전투봇] 태그된 러너 없음"
+          last_status_id = status['id']
+          next
+        end
+        
+        runner_tags = usernames.map { |m| "@#{m['acct']}" }.join(" ")
+        
         battle_active = true
         battle_announced = false
         battle_start_time = Time.now
         battle_round = content.match(/\[(\d+)\]/)&.[](1) || "1"
         battle_actions = {}
         processed_messages = {}
-        
-        mentions = status['mentions']
-        usernames = mentions.select { |m| m['acct'] != 'DOWN' }
-        total_runners = usernames.size
         
         creature_config = creature_sheet.read_creature_config
         creature_name = creature_config[:name] || "크리쳐"
@@ -97,7 +107,7 @@ loop do
         creature_config = creature_sheet.read_creature_config
         creature_name = creature_config[:name] || "크리쳐"
         
-        announcement = "[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
+        announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
                        "───────────────────\n" \
                        "DM으로 행동을 입력해주세요.\n\n" \
                        "형식:\n" \
@@ -168,7 +178,16 @@ loop do
             if battle_actions.size >= total_runners
               creature_config = creature_sheet.read_creature_config
               creature_name = creature_config[:name] || "크리쳐"
-              listener.post_public("[#{battle_round}라운드] #{creature_name} 전투 진행 중...\n\n(정산 중)")
+              
+              result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과\n\n"
+              battle_actions.each do |username, action|
+                result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
+              end
+              
+              parent_id = listener.post_public(result)
+              sleep(1)
+              listener.reply_public(parent_id, "전투 정산 완료!")
+              
               battle_active = false
               puts "[전투봇] 모든 러너 입력 완료 - 전투 진행"
             end
@@ -180,7 +199,16 @@ loop do
       if (Time.now - battle_start_time) >= 300
         creature_config = creature_sheet.read_creature_config
         creature_name = creature_config[:name] || "크리쳐"
-        listener.post_public("[#{battle_round}라운드] 시간 초과\n\n#{creature_name} 전투 정산 완료!")
+        
+        result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)\n\n"
+        battle_actions.each do |username, action|
+          result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
+        end
+        
+        parent_id = listener.post_public(result)
+        sleep(1)
+        listener.reply_public(parent_id, "전투 정산 완료!")
+        
         battle_active = false
         battle_actions = {}
         processed_messages = {}
