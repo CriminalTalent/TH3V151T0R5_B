@@ -1,9 +1,11 @@
-# sheet_manager.rb
 require 'google/apis/sheets_v4'
 require 'googleauth'
 
 class SheetManager
   SCOPE = Google::Apis::SheetsV4::AUTH_SPREADSHEETS
+
+  MAP_RANGE   = "맵현황!B3:H10"
+  STATE_RANGE = "현황!E4:H11"
 
   def initialize(sheet_id, credentials_path)
     @sheet_id = sheet_id
@@ -100,14 +102,12 @@ class SheetManager
         rows << [name, skill, left] if left > 0
       end
     end
+
     blank = Array.new(100) { ['', '', ''] }
-    body_clear = Google::Apis::SheetsV4::ValueRange.new(values: blank)
-    @service.update_spreadsheet_value(@sheet_id, "쿨타임!A2:C101", body_clear, value_input_option: 'RAW')
+    write("쿨타임!A2:C101", blank)
     return if rows.size <= 1
-    body = Google::Apis::SheetsV4::ValueRange.new(values: rows[1..])
-    @service.update_spreadsheet_value(
-      @sheet_id, "쿨타임!A2:C#{rows.size}", body, value_input_option: 'RAW'
-    )
+
+    write("쿨타임!A2:C#{rows.size}", rows[1..])
   rescue => e
     puts "[Sheet 오류] write_cooldowns: #{e.message}"
   end
@@ -134,63 +134,68 @@ class SheetManager
         rows << [name, b[:type], b[:value], b[:left]] if b[:left] > 0 || b[:left] == 999
       end
     end
+
     blank = Array.new(200) { ['', '', '', ''] }
-    body_clear = Google::Apis::SheetsV4::ValueRange.new(values: blank)
-    @service.update_spreadsheet_value(@sheet_id, "버프!A2:D201", body_clear, value_input_option: 'RAW')
+    write("버프!A2:D201", blank)
     return if rows.size <= 1
-    body = Google::Apis::SheetsV4::ValueRange.new(values: rows[1..])
-    @service.update_spreadsheet_value(
-      @sheet_id, "버프!A2:D#{rows.size}", body, value_input_option: 'RAW'
-    )
+
+    write("버프!A2:D#{rows.size}", rows[1..])
   rescue => e
     puts "[Sheet 오류] write_buffs: #{e.message}"
   end
 
   def read_runner_state
-    grid = read("자동봇!B4:I11")
+    grid = read(MAP_RANGE)
     positions = {}
+
     grid.each_with_index do |row, row_idx|
       row.each_with_index do |cell, col_idx|
         name = cell.to_s.strip
         next if name.empty?
+
         col_letter = ('A'.ord + col_idx).chr
         row_number = row_idx + 1
         positions[name] = "#{col_letter}#{row_number}"
       end
     end
 
-    rows = read("자동봇!O15:S25")
+    rows = read(STATE_RANGE)
     rows.map do |r|
       next if r[0].to_s.strip.empty?
+
       name = r[0].to_s.strip
       {
         name:   name,
-        pos:    positions[name] || '',
-        hp:     r[2].to_i,
-        max_hp: r[4].to_i
+        pos:    r[1].to_s.strip.empty? ? positions[name].to_s : r[1].to_s.strip,
+        hp:     extract_hp_current(r[2]),
+        max_hp: r[3].to_i
       }
     end.compact
   end
 
   def update_runner_state(states)
-    grid = Array.new(8) { Array.new(8, '') }
-    table_rows = []
+    grid = Array.new(8) { Array.new(7, '') }
+    table_rows = Array.new(8) { ['', '', '', ''] }
 
-    states.each do |s|
-      pos = s[:pos].to_s.strip
-      if pos.match?(/^[A-H][1-8]$/)
-        col = pos[0].upcase.ord - 'A'.ord
+    states.first(8).each_with_index do |s, i|
+      pos = s[:pos].to_s.strip.upcase
+
+      if pos.match?(/^[A-G][1-8]$/)
+        col = pos[0].ord - 'A'.ord
         row = pos[1..].to_i - 1
         grid[row][col] = s[:name]
       end
-      table_rows << [s[:name], s[:pos], health_bar(s[:hp], s[:max_hp]), '', s[:max_hp]]
+
+      table_rows[i] = [
+        s[:name],
+        pos,
+        health_bar(s[:hp], s[:max_hp]),
+        s[:max_hp]
+      ]
     end
 
-    write("자동봇!B4:I11", grid)
-    body = Google::Apis::SheetsV4::ValueRange.new(values: table_rows)
-    @service.update_spreadsheet_value(
-      @sheet_id, "자동봇!O15:S#{table_rows.size + 14}", body, value_input_option: 'RAW'
-    )
+    write(MAP_RANGE, grid)
+    write(STATE_RANGE, table_rows)
   rescue => e
     puts "[Sheet 오류] update_runner_state: #{e.message}"
   end
@@ -202,16 +207,19 @@ class SheetManager
       next if name.empty?
       return { name: name }
     end
-    nil
+    { name: "크리쳐" }
   end
 
   def read_creature_stats(creature_name)
     rows = read("스탯!B2:K30")
     rows.each do |r|
       next if r[0].to_s.strip != creature_name
+
+      hp = r[1].to_i
       return {
         name:   creature_name,
-        hp:     r[1].to_i,
+        hp:     hp,
+        max_hp: hp,
         dur:    r[2].to_i,
         atk:    r[3].to_i,
         agi:    r[4].to_i,
@@ -219,70 +227,89 @@ class SheetManager
         luck:   r[6].to_i,
         skill1: r[7].to_s.strip,
         skill2: r[8].to_s.strip,
-        facing: r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip
+        facing: r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip,
+        pos:    'D4'
       }
     end
-    nil
+
+    {
+      name: "크리쳐",
+      hp: 200,
+      max_hp: 200,
+      pos: "D4",
+      facing: "하"
+    }
   end
 
   def update_creature_state(state)
-    grid = read("자동봇!B4:I11")
+    grid = read(MAP_RANGE)
+    grid = normalize_grid(grid, 8, 7)
+
     grid.each_with_index do |row, row_idx|
       row.each_with_index do |cell, col_idx|
-        if cell.to_s.strip == state[:name]
-          grid[row_idx][col_idx] = ''
-        end
+        grid[row_idx][col_idx] = '' if cell.to_s.strip == state[:name].to_s.strip
       end
     end
 
-    if state[:pos].match?(/^[A-H][1-8]$/)
-      col = state[:pos][0].upcase.ord - 'A'.ord
-      row = state[:pos][1..].to_i - 1
+    pos = state[:pos].to_s.strip.upcase
+    if pos.match?(/^[A-G][1-8]$/)
+      col = pos[0].ord - 'A'.ord
+      row = pos[1..].to_i - 1
       grid[row][col] = state[:name]
     end
 
-    write("자동봇!B4:I11", grid)
-
-    creature_row = [state[:name], state[:pos], health_bar(state[:hp], state[:max_hp]), '', state[:max_hp]]
-    write("자동봇!O27:S27", [creature_row])
+    write(MAP_RANGE, grid)
   rescue => e
     puts "[Sheet 오류] update_creature_state: #{e.message}"
   end
 
   def health_bar(current, max)
     return "0/0" if max.to_i <= 0
+
     ratio  = current.to_f / max.to_f
     filled = (ratio * 10).round
     filled = [[filled, 10].min, 0].max
     bar = ("█" * filled) + ("░" * (10 - filled))
+
     "#{bar}  #{current}/#{max}"
   end
 
-  def update_view_map(all_states)
-    grid = Array.new(8) { Array.new(8, '') }
-    all_states.each do |s|
-      pos = s[:pos].to_s.strip
-      next if pos.empty?
-      col = pos[0].upcase.ord - 'A'.ord
-      row = pos[1..].to_i - 1
-      next if col < 0 || col > 7 || row < 0 || row > 7
-      grid[row][col] = s[:name]
-    end
-    write("전황!C5:J12", grid)
+  def extract_hp_current(value)
+    text = value.to_s
+    match = text.match(/(\d+)\s*\/\s*(\d+)/)
+    return match[1].to_i if match
+
+    text.to_i
   end
 
-  def update_view_team(states, team_name)
-    range = "전황!O16:S23"
-    rows = Array.new(8) { ['', '', '', '', ''] }
-    states.first(8).each_with_index do |s, i|
-      bar = health_bar(s[:hp], s[:max_hp])
-      rows[i] = [s[:name], s[:pos], bar, '', s[:max_hp]]
+  def normalize_grid(grid, rows, cols)
+    Array.new(rows) do |r|
+      Array.new(cols) do |c|
+        grid.dig(r, c).to_s
+      end
     end
-    write(range, rows)
+  end
+
+  def update_view_map(all_states)
+    grid = Array.new(8) { Array.new(7, '') }
+
+    all_states.each do |s|
+      pos = s[:pos].to_s.strip.upcase
+      next unless pos.match?(/^[A-G][1-8]$/)
+
+      col = pos[0].ord - 'A'.ord
+      row = pos[1..].to_i - 1
+      grid[row][col] = s[:name]
+    end
+
+    write(MAP_RANGE, grid)
+  end
+
+  def update_view_team(states, team_name = nil)
+    update_runner_state(states)
   end
 
   def update_view_creature(state)
-    bar = health_bar(state[:hp], state[:max_hp])
-    write("전황!O28:S28", [[state[:name], state[:pos], bar, '', state[:max_hp]]])
+    update_creature_state(state)
   end
 end
