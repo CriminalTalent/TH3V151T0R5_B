@@ -152,7 +152,9 @@ loop do
 
       if content.include?('[전투시작]') && !battle_active
         usernames = status['mentions'].to_a.map { |m| m['username'] }.uniq
-        usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq if usernames.empty()
+        if usernames.empty?
+          usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq
+        end
         usernames.reject! { |u| u == BOT_USERNAME }
 
         total_runners = usernames.size
