@@ -4,7 +4,7 @@ require 'uri'
 
 class MastodonListener
   def initialize(base_url, token)
-    @base_url = base_url
+    @base_url = base_url.to_s.sub(%r{/\z}, '')
     @token = token
   end
 
@@ -36,7 +36,7 @@ class MastodonListener
     uri = URI("#{@base_url}/api/v1/statuses")
 
     http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = true
+    http.use_ssl = uri.scheme == 'https'
     http.open_timeout = 10
     http.read_timeout = 30
 
@@ -53,15 +53,12 @@ class MastodonListener
       return nil
     end
 
-    begin
-      data = JSON.parse(res.body)
-      data['id']
-    rescue JSON::ParserError => e
-      puts "[Mastodon 오류] JSON 파싱 실패: #{e.message}"
-      puts res.body
-      nil
-    end
+    data = JSON.parse(res.body)
+    data['id']
 
+  rescue JSON::ParserError => e
+    puts "[Mastodon 오류] JSON 파싱 실패: #{e.message}"
+    nil
   rescue => e
     puts "[Mastodon 오류] #{e.class}: #{e.message}"
     nil
