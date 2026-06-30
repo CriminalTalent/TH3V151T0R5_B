@@ -50,7 +50,7 @@ loop do
       next unless content.include?('[전투시작]')
       
       mentions = status['mentions']
-      usernames = mentions.map { |m| "@#{m['acct']}" }.join(" ")
+      usernames = mentions.map { |m| "@#{m['acct']}" }.reject { |u| u == '@DOWN' }.join(" ")
       round = content.match(/\[(\d+)\]/)&.[](1) || "1"
       
       announcement = "[#{round}라운드 시작]\n\n#{usernames}\n\nDM으로 행동을 입력해주세요.\n" \
