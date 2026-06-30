@@ -32,7 +32,7 @@ listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKE
 
 puts "[전투봇] 초기화 완료 - 공개 타임라인 모니터링"
 
-last_status_id = nil
+processed_statuses = Set.new
 battle_active = false
 battle_actions = {}
 battle_start_time = nil
@@ -41,9 +41,22 @@ processed_messages = {}
 battle_announced = false
 total_runners = 0
 runner_tags = ""
+auto_next_round_timer = nil
 
 loop do
   begin
+    # 자동 다음라운드 진행
+    if auto_next_round_timer && (Time.now - auto_next_round_timer) >= 3
+      battle_round = battle_round.to_i + 1
+      battle_active = true
+      battle_announced = false
+      battle_start_time = Time.now
+      battle_actions = {}
+      processed_messages = {}
+      auto_next_round_timer = nil
+      puts "[전투봇] #{battle_round}라운드 자동 시작"
+    end
+    
     # 공개 타임라인 체크
     uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/timelines/public?local=true")
     http = Net::HTTP.new(uri.host, uri.port)
@@ -59,23 +72,24 @@ loop do
     statuses = JSON.parse(res.body)
     
     statuses.each do |status|
-      next if last_status_id && status['id'].to_i <= last_status_id.to_i
+      status_id = status['id']
+      next if processed_statuses.include?(status_id)
       
       content = status['content'].gsub(/<[^>]*>/, '')
       
       if content.include?('[전투시작]') && !battle_active
         mentions = status['mentions']
-        usernames = mentions.select { |m| m['acct'] != 'DOWN' }
+        usernames = mentions.map { |m| m['acct'] }.select { |u| u != 'DOWN' && !u.empty? }
         total_runners = usernames.size
         
         if total_runners == 0
           listener.post_public("[전투시작] 참여자가 없습니다. 태그를 추가하세요.")
           puts "[전투봇] 태그된 러너 없음"
-          last_status_id = status['id']
+          processed_statuses.add(status_id)
           next
         end
         
-        runner_tags = usernames.map { |m| "@#{m['acct']}" }.join(" ")
+        runner_tags = usernames.map { |u| "@#{u}" }.join(" ")
         
         battle_active = true
         battle_announced = false
@@ -83,29 +97,31 @@ loop do
         battle_round = content.match(/\[(\d+)\]/)&.[](1) || "1"
         battle_actions = {}
         processed_messages = {}
+        auto_next_round_timer = nil
         
-        creature_config = creature_sheet.read_creature_config
-        creature_name = creature_config[:name] || "크리쳐"
+        creature_stats = creature_sheet.read_creature_stats
+        creature_name = creature_stats.first&.dig(:name) || "크리쳐"
         
-        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명, 상대: #{creature_name}"
+        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{usernames.join(', ')}), 상대: #{creature_name}"
         
-        last_status_id = status['id']
+        processed_statuses.add(status_id)
       elsif content.include?('[전투종료]')
         battle_active = false
         battle_actions = {}
         processed_messages = {}
         battle_announced = false
+        auto_next_round_timer = nil
         listener.post_public("[전투 강제 종료]")
         puts "[전투봇] 전투 종료"
-        last_status_id = status['id']
+        processed_statuses.add(status_id)
       end
     end
     
     # 전투 중 DM 체크
     if battle_active
       if !battle_announced
-        creature_config = creature_sheet.read_creature_config
-        creature_name = creature_config[:name] || "크리쳐"
+        creature_stats = creature_sheet.read_creature_stats
+        creature_name = creature_stats.first&.dig(:name) || "크리쳐"
         
         announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
                        "───────────────────\n" \
@@ -176,27 +192,24 @@ loop do
             
             # 모든 러너가 입력했으면 전투 진행
             if battle_actions.size >= total_runners
-              creature_config = creature_sheet.read_creature_config
-              creature_name = creature_config[:name] || "크리쳐"
+              creature_stats = creature_sheet.read_creature_stats
+              creature_name = creature_stats.first&.dig(:name) || "크리쳐"
+              creature_hp = creature_stats.first&.dig(:hp) || 200
               
               result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과\n\n"
               result += "───────────────────\n"
               battle_actions.each do |username, action|
                 result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
               end
-              result += "───────────────────"
+              result += "───────────────────\n"
+              result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_hp}\n\n"
+              result += "전투 정산 완료! (#{(Time.now - battle_start_time).to_i}초)"
               
-              parent_id = listener.post_public(result)
-              sleep(1)
-              
-              detailed = "#{creature_name} 현재 상태: 건강 100/200\n" \
-                         "전투 정산 완료!\n\n" \
-                         "[다음 라운드 대기 중...]\n" \
-                         "GM의 [전투시작] 명령을 기다리는 중"
-              listener.reply_public(parent_id, detailed)
+              listener.post_public(result)
               
               battle_active = false
-              puts "[전투봇] 모든 러너 입력 완료 - 전투 진행"
+              auto_next_round_timer = Time.now
+              puts "[전투봇] 모든 러너 입력 완료 - 3초 후 다음라운드"
             end
           end
         end
@@ -204,30 +217,24 @@ loop do
       
       # 5분 경과 체크
       if (Time.now - battle_start_time) >= 300
-        creature_config = creature_sheet.read_creature_config
-        creature_name = creature_config[:name] || "크리쳐"
+        creature_stats = creature_sheet.read_creature_stats
+        creature_name = creature_stats.first&.dig(:name) || "크리쳐"
+        creature_hp = creature_stats.first&.dig(:hp) || 200
         
         result = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)\n\n"
         result += "───────────────────\n"
         battle_actions.each do |username, action|
           result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
         end
-        result += "───────────────────"
+        result += "───────────────────\n"
+        result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_hp}\n\n"
+        result += "전투 정산 완료! (5분)"
         
-        parent_id = listener.post_public(result)
-        sleep(1)
-        
-        detailed = "#{creature_name} 현재 상태: 건강 100/200\n" \
-                   "전투 정산 완료!\n\n" \
-                   "[다음 라운드 대기 중...]\n" \
-                   "GM의 [전투시작] 명령을 기다리는 중"
-        listener.reply_public(parent_id, detailed)
+        listener.post_public(result)
         
         battle_active = false
-        battle_actions = {}
-        processed_messages = {}
-        battle_announced = false
-        puts "[전투봇] #{battle_round}라운드 5분 경과 - 자동 정산"
+        auto_next_round_timer = Time.now
+        puts "[전투봇] #{battle_round}라운드 5분 경과 - 3초 후 다음라운드"
       end
     end
     
