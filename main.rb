@@ -15,6 +15,7 @@ OPS_SHEET_ID      = ENV['OPS_SHEET_ID']
 RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
 CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
 VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
+RUNNER_SHEET_URL  = ENV['RUNNER_SHEET_URL']
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
 POLL_INTERVAL     = 30
 PHASE_FILE        = File.join(__dir__, 'battle_phase.json')
@@ -34,26 +35,17 @@ def clear_phase
   File.delete(PHASE_FILE) if File.exist?(PHASE_FILE)
 end
 
-def announce_round(trigger, mastodon, ops_sheet, runner_sheet)
+def announce_round(trigger, mastodon)
   round = trigger[:round]
   
   mastodon.post_public(
-    "[#{round}라운드 시작]\n" \
-    "A팀은 이동 좌표를 DM으로 전송해주세요.\n" \
-    "형식: [이동/(좌표)] (예: [이동/D5])\n\n" \
+    "[#{round}라운드 시작]\n\n" \
+    "A팀은 아래 시트에서 이동 좌표를 입력해주세요.\n" \
+    "#{RUNNER_SHEET_URL}\n\n" \
+    "이동 좌표: A1~H8 중 선택\n" \
     "크리쳐는 자동으로 공격합니다."
   )
 
-  runner_info = runner_sheet.read_runner_info
-  runner_info.each do |info|
-    username = info[:username]
-    name = info[:name]
-    next if username.empty?
-    mastodon.send_dm(username, "[#{round}라운드] #{name}님, 이동할 좌표를 DM으로 알려주세요.\n형식: A1 ~ H8 중 선택")
-  end
-
-  write_phase({ round: round, status: 'waiting_commands' })
-  ops_sheet.turn_off_trigger
   puts "[전투봇] #{round}라운드 알림 완료"
 end
 
@@ -134,7 +126,8 @@ def run_once(ops_sheet, runner_sheet, creature_sheet, view_sheet, mastodon)
     ops_sheet.turn_off_trigger
     settle_round(phase, ops_sheet, runner_sheet, creature_sheet, view_sheet, mastodon)
   else
-    announce_round(trigger, mastodon, ops_sheet, runner_sheet)
+    announce_round(trigger, mastodon)
+    write_phase({ round: trigger[:round], status: 'waiting_commands' })
   end
 rescue => e
   puts "[전투봇 오류] #{e.class}: #{e.message}"
