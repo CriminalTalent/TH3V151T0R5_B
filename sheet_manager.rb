@@ -35,18 +35,19 @@ class SheetManager
     rows = read("스탯!B2:K30")
     rows.map do |r|
       {
-        name:     r[0].to_s.strip,
-        house:    '',
-        passive:  '1',
-        hp:       r[1].to_i,
-        dur:      r[2].to_i,
-        atk:      r[3].to_i,
-        agi:      r[4].to_i,
-        tec:      r[5].to_i,
-        luck:     r[6].to_i,
-        skill1:   r[7].to_s.strip,
-        skill2:   r[8].to_s.strip,
-        facing:   r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip
+        name:    r[0].to_s.strip,
+        house:   '',
+        passive: '1',
+        hp:      r[1].to_i,
+        max_hp:  r[1].to_i,
+        dur:     r[2].to_i,
+        atk:     r[3].to_i,
+        agi:     r[4].to_i,
+        tec:     r[5].to_i,
+        luck:    r[6].to_i,
+        skill1:  r[7].to_s.strip,
+        skill2:  r[8].to_s.strip,
+        facing:  r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip
       }
     end.reject { |r| r[:name].empty? }
   end
@@ -67,6 +68,7 @@ class SheetManager
   def read_battle_state
     rows = read("전투상태!A2:C2")
     return nil if rows.empty?
+
     row = rows[0]
     {
       round: row[0].to_i,
@@ -84,30 +86,34 @@ class SheetManager
   def read_cooldowns
     rows = read("쿨타임!A2:C100")
     result = {}
+
     rows.each do |r|
       name  = r[0].to_s.strip
       skill = r[1].to_s.strip
       left  = r[2].to_i
       next if name.empty? || skill.empty?
+
       result[name] ||= {}
       result[name][skill] = left
     end
+
     result
   end
 
   def write_cooldowns(cooldowns_hash)
-    rows = [['캐릭터명', '스킬명', '남은라운드수']]
+    blank = Array.new(100) { ['', '', ''] }
+    write("쿨타임!A2:C101", blank)
+
+    rows = []
     cooldowns_hash.each do |name, skills|
       skills.each do |skill, left|
-        rows << [name, skill, left] if left > 0
+        rows << [name, skill, left] if left.to_i > 0
       end
     end
 
-    blank = Array.new(100) { ['', '', ''] }
-    write("쿨타임!A2:C101", blank)
-    return if rows.size <= 1
+    return if rows.empty?
 
-    write("쿨타임!A2:C#{rows.size}", rows[1..])
+    write("쿨타임!A2:C#{rows.size + 1}", rows)
   rescue => e
     puts "[Sheet 오류] write_cooldowns: #{e.message}"
   end
@@ -115,37 +121,46 @@ class SheetManager
   def read_buffs
     rows = read("버프!A2:D200")
     result = {}
+
     rows.each do |r|
       name = r[0].to_s.strip
       type = r[1].to_s.strip
       val  = r[2].to_s.strip
       left = r[3].to_i
       next if name.empty? || type.empty?
+
       result[name] ||= []
-      result[name] << { type: type, value: val, left: left }
+      result[name] << {
+        type: type,
+        value: val,
+        left: left
+      }
     end
+
     result
   end
 
   def write_buffs(buffs_hash)
-    rows = [['캐릭터명', '종류', '값', '남은라운드수']]
+    blank = Array.new(200) { ['', '', '', ''] }
+    write("버프!A2:D201", blank)
+
+    rows = []
     buffs_hash.each do |name, list|
       list.each do |b|
-        rows << [name, b[:type], b[:value], b[:left]] if b[:left] > 0 || b[:left] == 999
+        left = b[:left].to_i
+        rows << [name, b[:type], b[:value], left] if left > 0 || left == 999
       end
     end
 
-    blank = Array.new(200) { ['', '', '', ''] }
-    write("버프!A2:D201", blank)
-    return if rows.size <= 1
+    return if rows.empty?
 
-    write("버프!A2:D#{rows.size}", rows[1..])
+    write("버프!A2:D#{rows.size + 1}", rows)
   rescue => e
     puts "[Sheet 오류] write_buffs: #{e.message}"
   end
 
   def read_runner_state
-    grid = read(MAP_RANGE)
+    grid = normalize_grid(read(MAP_RANGE), 8, 7)
     positions = {}
 
     grid.each_with_index do |row, row_idx|
@@ -159,11 +174,12 @@ class SheetManager
       end
     end
 
-    rows = read(STATE_RANGE)
-    rows.map do |r|
-      next if r[0].to_s.strip.empty?
+    rows = normalize_grid(read(STATE_RANGE), 8, 4)
 
+    rows.map do |r|
       name = r[0].to_s.strip
+      next if name.empty?
+
       {
         name:   name,
         pos:    r[1].to_s.strip.empty? ? positions[name].to_s : r[1].to_s.strip,
@@ -178,19 +194,22 @@ class SheetManager
     table_rows = Array.new(8) { ['', '', '', ''] }
 
     states.first(8).each_with_index do |s, i|
-      pos = s[:pos].to_s.strip.upcase
+      name = s[:name].to_s.strip
+      pos  = s[:pos].to_s.strip.upcase
+      hp   = s[:hp].to_i
+      max  = s[:max_hp].to_i
 
       if pos.match?(/^[A-G][1-8]$/)
         col = pos[0].ord - 'A'.ord
         row = pos[1..].to_i - 1
-        grid[row][col] = s[:name]
+        grid[row][col] = name
       end
 
       table_rows[i] = [
-        s[:name],
+        name,
         pos,
-        health_bar(s[:hp], s[:max_hp]),
-        s[:max_hp]
+        health_bar(hp, max),
+        max
       ]
     end
 
@@ -202,22 +221,28 @@ class SheetManager
 
   def read_creature_config
     rows = read("보스!B2:B30")
+
     rows.each do |r|
       name = r[0].to_s.strip
       next if name.empty?
+
       return { name: name }
     end
+
     { name: "크리쳐" }
   end
 
   def read_creature_stats(creature_name)
     rows = read("스탯!B2:K30")
+
     rows.each do |r|
-      next if r[0].to_s.strip != creature_name
+      name = r[0].to_s.strip
+      next if name != creature_name.to_s.strip
 
       hp = r[1].to_i
+
       return {
-        name:   creature_name,
+        name:   name,
         hp:     hp,
         max_hp: hp,
         dur:    r[2].to_i,
@@ -233,7 +258,7 @@ class SheetManager
     end
 
     {
-      name: "크리쳐",
+      name: creature_name.to_s.strip.empty? ? "크리쳐" : creature_name.to_s.strip,
       hp: 200,
       max_hp: 200,
       pos: "D4",
@@ -242,20 +267,21 @@ class SheetManager
   end
 
   def update_creature_state(state)
-    grid = read(MAP_RANGE)
-    grid = normalize_grid(grid, 8, 7)
+    grid = normalize_grid(read(MAP_RANGE), 8, 7)
+
+    name = state[:name].to_s.strip
+    pos  = state[:pos].to_s.strip.upcase
 
     grid.each_with_index do |row, row_idx|
       row.each_with_index do |cell, col_idx|
-        grid[row_idx][col_idx] = '' if cell.to_s.strip == state[:name].to_s.strip
+        grid[row_idx][col_idx] = '' if cell.to_s.strip == name
       end
     end
 
-    pos = state[:pos].to_s.strip.upcase
     if pos.match?(/^[A-G][1-8]$/)
       col = pos[0].ord - 'A'.ord
       row = pos[1..].to_i - 1
-      grid[row][col] = state[:name]
+      grid[row][col] = name
     end
 
     write(MAP_RANGE, grid)
@@ -263,8 +289,36 @@ class SheetManager
     puts "[Sheet 오류] update_creature_state: #{e.message}"
   end
 
+  def update_view_map(all_states)
+    grid = Array.new(8) { Array.new(7, '') }
+
+    all_states.each do |s|
+      name = s[:name].to_s.strip
+      pos  = s[:pos].to_s.strip.upcase
+      next if name.empty?
+      next unless pos.match?(/^[A-G][1-8]$/)
+
+      col = pos[0].ord - 'A'.ord
+      row = pos[1..].to_i - 1
+      grid[row][col] = name
+    end
+
+    write(MAP_RANGE, grid)
+  end
+
+  def update_view_team(states, team_name = nil)
+    update_runner_state(states)
+  end
+
+  def update_view_creature(state)
+    update_creature_state(state)
+  end
+
   def health_bar(current, max)
-    return "0/0" if max.to_i <= 0
+    current = current.to_i
+    max = max.to_i
+
+    return "0/0" if max <= 0
 
     ratio  = current.to_f / max.to_f
     filled = (ratio * 10).round
@@ -288,28 +342,5 @@ class SheetManager
         grid.dig(r, c).to_s
       end
     end
-  end
-
-  def update_view_map(all_states)
-    grid = Array.new(8) { Array.new(7, '') }
-
-    all_states.each do |s|
-      pos = s[:pos].to_s.strip.upcase
-      next unless pos.match?(/^[A-G][1-8]$/)
-
-      col = pos[0].ord - 'A'.ord
-      row = pos[1..].to_i - 1
-      grid[row][col] = s[:name]
-    end
-
-    write(MAP_RANGE, grid)
-  end
-
-  def update_view_team(states, team_name = nil)
-    update_runner_state(states)
-  end
-
-  def update_view_creature(state)
-    update_creature_state(state)
   end
 end
