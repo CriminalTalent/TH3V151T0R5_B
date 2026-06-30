@@ -166,51 +166,50 @@ class SheetManager
     puts "[Sheet 오류] write_buffs: #{e.message}"
   end
 
-  def read_runner_commands
-    rows = read("커맨드!A2:I50")
-    rows.map do |r|
-      next if r[0].to_s.strip.empty?
-      {
-        name:       r[0].to_s.strip,
-        move_to:    r[1].to_s.strip,
-        action:     r[2].to_s.strip,
-        targets:    [r[3], r[4], r[5], r[6], r[7]].map { |t| t.to_s.strip }.reject(&:empty?),
-        target_pos: r[8].to_s.strip,
-        extra:      ''
-      }
-    end.compact
-  end
-
   def read_runner_state
-    rows = read("현황!A2:D50")
-    rows.map do |r|
-      next if r[0].to_s.strip.empty?
-      {
-        name:   r[0].to_s.strip,
-        pos:    r[1].to_s.strip,
-        hp:     r[2].to_i,
-        max_hp: r[3].to_i
-      }
-    end.compact
-  end
+    grid = read("현황!B4:I11")
+    positions = {}
+    grid.each_with_index do |row, row_idx|
+      row.each_with_index do |cell, col_idx|
+        name = cell.to_s.strip
+        next if name.empty?
+        col_letter = ('A'.ord + col_idx).chr
+        row_number = row_idx + 1
+        positions[name] = "#{col_letter}#{row_number}"
+      end
+    end
 
-  def read_runner_info
-    rows = read("현황!A2:C50")
+    rows = read("현황!O15:S25")
     rows.map do |r|
       next if r[0].to_s.strip.empty?
+      name = r[0].to_s.strip
       {
-        name:     r[0].to_s.strip,
-        username: r[1].to_s.strip,
-        pos:      r[2].to_s.strip
+        name:   name,
+        pos:    positions[name] || '',
+        hp:     r[2].to_i,
+        max_hp: r[4].to_i
       }
     end.compact
   end
 
   def update_runner_state(states)
-    rows = states.map { |s| [s[:name], s[:pos], s[:hp], s[:max_hp]] }
-    body = Google::Apis::SheetsV4::ValueRange.new(values: rows)
+    grid = Array.new(8) { Array.new(8, '') }
+    table_rows = []
+
+    states.each do |s|
+      pos = s[:pos].to_s.strip
+      if pos.match?(/^[A-H][1-8]$/)
+        col = pos[0].upcase.ord - 'A'.ord
+        row = pos[1..].to_i - 1
+        grid[row][col] = s[:name]
+      end
+      table_rows << [s[:name], s[:pos], health_bar(s[:hp], s[:max_hp]), '', s[:max_hp]]
+    end
+
+    write("현황!B4:I11", grid)
+    body = Google::Apis::SheetsV4::ValueRange.new(values: table_rows)
     @service.update_spreadsheet_value(
-      @sheet_id, "현황!A2:D#{rows.size + 1}", body, value_input_option: 'RAW'
+      @sheet_id, "현황!O15:S#{table_rows.size + 14}", body, value_input_option: 'RAW'
     )
   rescue => e
     puts "[Sheet 오류] update_runner_state: #{e.message}"
@@ -250,12 +249,25 @@ class SheetManager
   end
 
   def update_creature_state(state)
-    rows = read("현황!A2:D50")
-    rows[0] = [state[:name], state[:pos], state[:hp], state[:max_hp]]
-    body = Google::Apis::SheetsV4::ValueRange.new(values: rows)
-    @service.update_spreadsheet_value(
-      @sheet_id, "현황!A2:D#{rows.size + 1}", body, value_input_option: 'RAW'
-    )
+    grid = read("현황!B4:I11")
+    grid.each_with_index do |row, row_idx|
+      row.each_with_index do |cell, col_idx|
+        if cell.to_s.strip == state[:name]
+          grid[row_idx][col_idx] = ''
+        end
+      end
+    end
+
+    if state[:pos].match?(/^[A-H][1-8]$/)
+      col = state[:pos][0].upcase.ord - 'A'.ord
+      row = state[:pos][1..].to_i - 1
+      grid[row][col] = state[:name]
+    end
+
+    write("현황!B4:I11", grid)
+
+    creature_row = [state[:name], state[:pos], health_bar(state[:hp], state[:max_hp]), '', state[:max_hp]]
+    write("현황!O27:S27", [creature_row])
   rescue => e
     puts "[Sheet 오류] update_creature_state: #{e.message}"
   end
@@ -294,6 +306,6 @@ class SheetManager
 
   def update_view_creature(state)
     bar = health_bar(state[:hp], state[:max_hp])
-    write("현황!O28:S35", [[state[:name], state[:pos], bar, '', state[:max_hp]]])
+    write("현황!O28:S28", [[state[:name], state[:pos], bar, '', state[:max_hp]]])
   end
 end
