@@ -4,6 +4,9 @@ $stderr.sync = true
 require 'dotenv'
 require 'json'
 require 'time'
+require 'net/http'
+require 'uri'
+
 Dotenv.load(File.join(__dir__, '.env'))
 
 require_relative 'sheet_manager'
@@ -27,20 +30,23 @@ last_status_id = nil
 
 loop do
   begin
-    uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/timelines/local")
+    uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/timelines/public?local=true")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
+    http.read_timeout = 10
     
     req = Net::HTTP::Get.new(uri)
     req['Authorization'] = "Bearer #{ENV['BATTLE_TOKEN']}"
     
     res = http.request(req)
+    next if res.code != '200'
+    
     statuses = JSON.parse(res.body)
     
     statuses.each do |status|
       next if last_status_id && status['id'].to_i <= last_status_id.to_i
       
-      content = status['content']
+      content = status['content'].gsub(/<[^>]*>/, '')
       next unless content.include?('[전투시작]')
       
       mentions = status['mentions']
