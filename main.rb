@@ -19,14 +19,14 @@ VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
 BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
 
+ROUND_WAIT_SECONDS = 60
+ACTION_WAIT_SECONDS = 300
+
 LOCATION_MAP = {
   '스토디시' => 'E7',
   'A' => 'A1', 'B' => 'B1', 'C' => 'C1', 'D' => 'D1',
   'E' => 'E1', 'F' => 'F1', 'G' => 'G1'
 }
-
-ROUND_WAIT_SECONDS = 60
-ACTION_WAIT_SECONDS = 300
 
 puts "[전투봇] 시작"
 
@@ -97,7 +97,6 @@ def snapshot_current_dm_ids(processed_dm_ids)
   fetch_conversations.each do |conv|
     last_status = conv['last_status']
     next unless last_status && last_status['id']
-
     processed_dm_ids.add(last_status['id'])
   end
 end
@@ -114,16 +113,59 @@ end
 
 def extract_usernames_from_status(status, content, bot_username)
   usernames = status['mentions'].to_a.map { |m| m['username'].to_s.strip }.reject(&:empty?).uniq
-
-  if usernames.empty?
-    usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq
-  end
-
+  usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq if usernames.empty?
   usernames.reject { |u| u == bot_username }.uniq
 end
 
-def build_result_text(runner_tags, battle_round, creature, battle_actions, elapsed, timeout: false)
-  creature_name = creature[:name] || creature[:이름] || '크리쳐'
+def normalize_target(target)
+  target.to_s.strip.sub(/^@/, '')
+end
+
+def runner_alive?(runner)
+  runner && runner[:hp].to_i > 0
+end
+
+def validate_action(username, action_type, action_target, runner_names, view_sheet, creature)
+  runner_state = view_sheet.read_runner_state
+  actor = runner_state.find { |r| r[:name] == username }
+
+  return [false, "현재 행동할 수 없는 상태입니다."] unless runner_alive?(actor)
+
+  case action_type
+  when '공격'
+    target = normalize_target(action_target)
+    creature_name = creature[:name].to_s
+
+    unless ['크리쳐', creature_name].include?(target)
+      return [false, "대상을 찾을 수 없습니다. 아이디 또는 크리쳐 이름을 확인해주세요."]
+    end
+
+  when '회복', '방어'
+    target = normalize_target(action_target)
+    unless runner_names.include?(target)
+      return [false, "대상을 찾을 수 없습니다. 아이디 또는 크리쳐 이름을 확인해주세요."]
+    end
+
+    target_runner = runner_state.find { |r| r[:name] == target }
+    return [false, "대상을 찾을 수 없습니다. 아이디 또는 크리쳐 이름을 확인해주세요."] unless target_runner
+
+  when '이동'
+    coord = LOCATION_MAP[action_target] || action_target
+    coord = coord.to_s.strip.upcase
+
+    unless coord.match?(/^[A-G][1-8]$/)
+      return [false, "이동 좌표가 올바르지 않습니다. A1~G8 범위로 입력해주세요."]
+    end
+
+  else
+    return [false, "형식이 올바르지 않습니다. [공격/크리쳐], [회복/아이디], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요."]
+  end
+
+  [true, nil]
+end
+
+def build_result_text(runner_tags, battle_round, creature, battle_actions, runner_names, elapsed, timeout: false)
+  creature_name = creature[:name] || '크리쳐'
   creature_hp = creature[:hp] || 200
   creature_max_hp = creature[:max_hp] || creature_hp
 
@@ -132,11 +174,12 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, elaps
   result = "#{runner_tags}\n\n#{title}\n\n"
   result += "───────────────────\n"
 
-  if battle_actions.empty?
-    result += "입력된 행동 없음\n"
-  else
-    battle_actions.each do |username, action|
-      result += "#{username}: [#{action[:type]}/#{action[:target]}]\n"
+  runner_names.each do |name|
+    action = battle_actions[name]
+    if action
+      result += "#{name}: [#{action[:type]}/#{action[:target]}]\n"
+    else
+      result += "#{name}: 턴 상실\n"
     end
   end
 
@@ -162,9 +205,7 @@ loop do
       puts "[전투봇] #{battle_round}라운드 자동 시작"
     end
 
-    statuses = fetch_public_statuses
-
-    statuses.each do |status|
+    fetch_public_statuses.each do |status|
       status_id = status['id']
       next if processed_statuses.include?(status_id)
 
@@ -201,11 +242,7 @@ loop do
         auto_next_round_timer = nil
 
         creature = current_creature(creature_sheet)
-        creature_name = creature[:name] || "크리쳐"
-
-        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{creature_name}"
-
-        processed_statuses.add(status_id)
+        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{creature[:name]}"
 
       elsif content.include?('[전투종료]')
         battle_active = false
@@ -216,19 +253,16 @@ loop do
 
         listener.post_public("[전투 강제 종료]")
         puts "[전투봇] 전투 종료"
-
-        processed_statuses.add(status_id)
-      else
-        processed_statuses.add(status_id)
       end
+
+      processed_statuses.add(status_id)
     end
 
     if battle_active
       unless battle_announced
         creature = current_creature(creature_sheet)
-        creature_name = creature[:name] || "크리쳐"
 
-        announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
+        announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature[:name]}와의 전투!\n\n" \
                        "───────────────────\n" \
                        "DM으로 행동을 입력해주세요.\n\n" \
                        "형식:\n" \
@@ -245,15 +279,12 @@ loop do
         puts "[전투봇] #{battle_round}라운드 안내 송출"
       end
 
-      conversations = fetch_conversations
-
-      conversations.each do |conv|
+      fetch_conversations.each do |conv|
         sender = conv['accounts'].first
         next unless sender
 
         username = sender['username']
         next unless runner_names.include?(username)
-        next if processed_messages[username]
 
         last_status = conv['last_status']
         next unless last_status
@@ -261,12 +292,32 @@ loop do
         dm_id = last_status['id']
         next if processed_dm_ids.include?(dm_id)
 
+        if processed_messages[username]
+          listener.send_dm(username, "이미 이번 라운드 행동을 제출했습니다.")
+          processed_dm_ids.add(dm_id)
+          next
+        end
+
         text = clean_html(last_status['content'])
         match = text.match(/\[(공격|회복|방어|이동)\/(.+?)\]/)
-        next unless match
+
+        unless match
+          listener.send_dm(username, "형식이 올바르지 않습니다. [공격/크리쳐], [회복/아이디], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.")
+          processed_dm_ids.add(dm_id)
+          next
+        end
 
         action_type = match[1]
         action_target = match[2].strip
+        creature = current_creature(creature_sheet)
+
+        valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, creature)
+
+        unless valid
+          listener.send_dm(username, error_message)
+          processed_dm_ids.add(dm_id)
+          next
+        end
 
         if action_type == '이동'
           coord = LOCATION_MAP[action_target] || action_target
@@ -279,8 +330,6 @@ loop do
             runner[:pos] = coord
             view_sheet.update_runner_state(runner_state)
             puts "[전투봇] #{username} 이동 → #{coord}"
-          else
-            puts "[전투봇] #{username} 이동 실패 - 현황 시트에서 러너를 찾을 수 없음"
           end
         end
 
@@ -304,6 +353,7 @@ loop do
             battle_round,
             creature,
             battle_actions,
+            runner_names,
             (Time.now - battle_start_time).to_i,
             timeout: false
           )
@@ -325,6 +375,7 @@ loop do
           battle_round,
           creature,
           battle_actions,
+          runner_names,
           ACTION_WAIT_SECONDS,
           timeout: true
         )
