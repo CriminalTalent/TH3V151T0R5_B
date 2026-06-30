@@ -1,3 +1,4 @@
+# main.rb
 $stdout.sync = true
 $stderr.sync = true
 
@@ -10,13 +11,13 @@ require_relative 'mastodon_client'
 require_relative 'battle_processor'
 require_relative 'toot_builder'
 
-OPS_SHEET_ID     = ENV['OPS_SHEET_ID']
-TEAM_A_SHEET_ID  = ENV['TEAM_A_SHEET_ID']
-TEAM_B_SHEET_ID  = ENV['TEAM_B_SHEET_ID']
-VIEW_SHEET_ID    = ENV['VIEW_SHEET_ID']
-CREDENTIALS_PATH = File.join(__dir__, 'credentials.json')
-POLL_INTERVAL    = 30
-PHASE_FILE       = File.join(__dir__, 'battle_phase.json')
+OPS_SHEET_ID      = ENV['OPS_SHEET_ID']
+RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
+CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
+VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
+CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
+POLL_INTERVAL     = 30
+PHASE_FILE        = File.join(__dir__, 'battle_phase.json')
 
 def read_phase
   return nil unless File.exist?(PHASE_FILE)
@@ -33,61 +34,53 @@ def clear_phase
   File.delete(PHASE_FILE) if File.exist?(PHASE_FILE)
 end
 
-def team_order(first_team)
-  first_team == 'A팀' ? ['A팀', 'B팀'] : ['B팀', 'A팀']
-end
-
 def announce_round(trigger, mastodon, ops_sheet)
   round = trigger[:round]
-  first_team = trigger[:team]
-  order = team_order(first_team)
-
   mastodon.post_public(
-    "[ #{round}라운드 커맨드 입력 안내 ]\n" \
-    "선공: #{order[0]}\n" \
-    "후공: #{order[1]}\n\n" \
-    "양 팀은 커맨드를 입력해주세요."
+    "[#{round}라운드 커맨드 입력 안내]\n" \
+    "A팀은 커맨드를 입력해주세요.\n\n" \
+    "크리쳐는 자동으로 공격합니다."
   )
-
-  write_phase({
-    round: round,
-    first_team: order[0],
-    second_team: order[1],
-    status: 'waiting_commands'
-  })
-
+  write_phase({ round: round, status: 'waiting_commands' })
   ops_sheet.turn_off_trigger
-  puts "[전투봇] #{round}라운드 알림 완료 — 선공 #{order[0]} / 후공 #{order[1]}"
+  puts "[전투봇] #{round}라운드 알림 완료"
 end
 
-def settle_round(phase, ops_sheet, team_sheets, view_sheet, mastodon)
+def settle_round(phase, ops_sheet, runner_sheet, creature_sheet, view_sheet, mastodon)
   round = phase[:round]
-  first_team = phase[:first_team]
-  second_team = phase[:second_team]
-
-  puts "[전투봇] #{round}라운드 전체 정산 시작 — #{first_team} → #{second_team}"
+  puts "[전투봇] #{round}라운드 전체 정산 시작"
 
   base_stats = ops_sheet.read_base_stats
+  a_commands = runner_sheet.read_runner_commands
+  a_state    = runner_sheet.read_runner_state
+  
+  creature_config = creature_sheet.read_creature_config
+  creature_name = creature_config&.dig(:name)
+  
+  unless creature_name
+    puts "[전투봇 오류] 활성화된 크리쳐 없음"
+    return
+  end
 
-  a_state = team_sheets['A팀'].read_current_state('A팀')
-  b_state = team_sheets['B팀'].read_current_state('B팀')
-  current_state = a_state + b_state
+  creature_base = creature_sheet.read_creature_stats(creature_name)
+  unless creature_base
+    puts "[전투봇 오류] 크리쳐 스탯 불러오기 실패: #{creature_name}"
+    return
+  end
 
-  first_commands  = team_sheets[first_team].read_commands(first_team)
-  second_commands = team_sheets[second_team].read_commands(second_team)
-  commands = first_commands + second_commands
+  creature_state = { name: creature_name, hp: creature_base[:hp], pos: 'A1' }
+  current_state = a_state + [creature_state]
 
   skill_data  = ops_sheet.read_skill_data
   corrections = ops_sheet.read_corrections
   cooldowns   = ops_sheet.read_cooldowns
   buffs_in    = ops_sheet.read_buffs
 
-  puts "[전투봇] 캐릭터 #{current_state.size}명 / 커맨드 #{commands.size}개 / 보정 #{corrections.size}개"
-  commands.each { |cmd| puts "[전투봇 DEBUG] cmd=#{cmd.inspect}" }
+  puts "[전투봇] A팀 #{a_state.size}명 / 크리쳐 #{creature_name} / 커맨드 #{a_commands.size}개"
 
   processor = BattleProcessor.new(
-    base_stats, current_state, commands, skill_data,
-    corrections, cooldowns, buffs_in, round, '전체'
+    base_stats, current_state, a_commands, skill_data, creature_base,
+    corrections, cooldowns, buffs_in, round
   )
 
   log, updated_states, updated_cooldowns, updated_buffs = processor.process
@@ -96,30 +89,18 @@ def settle_round(phase, ops_sheet, team_sheets, view_sheet, mastodon)
   ops_sheet.write_cooldowns(updated_cooldowns)
   ops_sheet.write_buffs(updated_buffs)
 
-  state_list = updated_states.values.map do |s|
-    base = base_stats.find { |b| b[:name] == s[:name] }
-    s[:max_hp] = base ? base[:hp] : s[:hp]
-    s
-  end
+  a_updated = updated_states.select { |name, _| a_state.any? { |s| s[:name] == name } }.values
+  creature_updated = updated_states[creature_name]
 
-  a_names = a_state.map { |s| s[:name] }
-  b_names = b_state.map { |s| s[:name] }
-
-  all_a = state_list.select { |s| a_names.include?(s[:name]) }
-  all_b = state_list.select { |s| b_names.include?(s[:name]) }
-
-  team_sheets['A팀'].update_current_state(all_a, 'A팀')
-  team_sheets['B팀'].update_current_state(all_b, 'B팀')
-
-  view_sheet.update_view_map(all_a + all_b)
-  view_sheet.update_view_team(all_a, 'A팀')
-  view_sheet.update_view_team(all_b, 'B팀')
+  runner_sheet.update_runner_state(a_updated)
+  creature_sheet.update_creature_state(creature_updated)
+  view_sheet.update_view_map(a_updated + [creature_updated])
+  view_sheet.update_view_team(a_updated, 'A팀')
+  view_sheet.update_view_creature(creature_updated)
 
   puts "[전투봇] 현황 + 맵 + 쿨타임 + 버프 업데이트 완료"
 
-  toots = TootBuilder.new(round, "전체", true, log).build
-  toots[0] = toots[0].sub("[#{round}라운드] 전체 (선공) 행동 정산", "[#{round}라운드 결과] #{first_team}(선공) / #{second_team}(후공)")
-
+  toots = TootBuilder.new(round, log).build
   puts "[전투봇] 툿 #{toots.size}개 생성"
 
   parent_id = nil
@@ -132,7 +113,7 @@ def settle_round(phase, ops_sheet, team_sheets, view_sheet, mastodon)
   puts "[전투봇] #{round}라운드 전체 정산 완료"
 end
 
-def run_once(ops_sheet, team_sheets, view_sheet, mastodon)
+def run_once(ops_sheet, runner_sheet, creature_sheet, view_sheet, mastodon)
   trigger = ops_sheet.read_trigger
   return unless trigger&.dig(:on)
 
@@ -140,7 +121,7 @@ def run_once(ops_sheet, team_sheets, view_sheet, mastodon)
 
   if phase && phase[:status] == 'waiting_commands'
     ops_sheet.turn_off_trigger
-    settle_round(phase, ops_sheet, team_sheets, view_sheet, mastodon)
+    settle_round(phase, ops_sheet, runner_sheet, creature_sheet, view_sheet, mastodon)
   else
     announce_round(trigger, mastodon, ops_sheet)
   end
@@ -151,15 +132,13 @@ end
 
 puts "[전투봇] 시작"
 
-ops_sheet  = SheetManager.new(OPS_SHEET_ID, CREDENTIALS_PATH)
-team_a     = SheetManager.new(TEAM_A_SHEET_ID, CREDENTIALS_PATH)
-team_b     = SheetManager.new(TEAM_B_SHEET_ID, CREDENTIALS_PATH)
-view_sheet = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
-mastodon   = MastodonClient.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
-
-team_sheets = { 'A팀' => team_a, 'B팀' => team_b }
+ops_sheet      = SheetManager.new(OPS_SHEET_ID, CREDENTIALS_PATH)
+runner_sheet   = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
+creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
+view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
+mastodon       = MastodonClient.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
 
 loop do
-  run_once(ops_sheet, team_sheets, view_sheet, mastodon)
+  run_once(ops_sheet, runner_sheet, creature_sheet, view_sheet, mastodon)
   sleep(POLL_INTERVAL)
 end
