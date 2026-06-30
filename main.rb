@@ -38,6 +38,8 @@ battle_actions = {}
 battle_start_time = nil
 battle_round = nil
 processed_messages = {}
+battle_announced = false
+total_runners = 0
 
 loop do
   begin
@@ -62,25 +64,27 @@ loop do
       
       if content.include?('[전투시작]') && !battle_active
         battle_active = true
+        battle_announced = false
         battle_start_time = Time.now
         battle_round = content.match(/\[(\d+)\]/)&.[](1) || "1"
         battle_actions = {}
         processed_messages = {}
         
         mentions = status['mentions']
-        usernames = mentions.map { |m| "@#{m['acct']}" }.reject { |u| u == '@DOWN' }.join(" ")
+        usernames = mentions.select { |m| m['acct'] != 'DOWN' }
+        total_runners = usernames.size
         
-        announcement = "[#{battle_round}라운드 시작]\n\n#{usernames}\n\nDM으로 행동을 입력해주세요.\n" \
-                       "[공격/(크리쳐)]\n[회복/아이디]\n[방어/아이디]\n[이동/좌표]\n\n입력 대기: 5분"
+        creature_config = creature_sheet.read_creature_config
+        creature_name = creature_config[:name] || "크리쳐"
         
-        listener.post_public(announcement)
-        puts "[전투봇] #{battle_round}라운드 시작"
+        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명, 상대: #{creature_name}"
         
         last_status_id = status['id']
       elsif content.include?('[전투종료]')
         battle_active = false
         battle_actions = {}
         processed_messages = {}
+        battle_announced = false
         listener.post_public("[전투 강제 종료]")
         puts "[전투봇] 전투 종료"
         last_status_id = status['id']
@@ -89,6 +93,26 @@ loop do
     
     # 전투 중 DM 체크
     if battle_active
+      if !battle_announced
+        creature_config = creature_sheet.read_creature_config
+        creature_name = creature_config[:name] || "크리쳐"
+        
+        announcement = "[#{battle_round}라운드] #{creature_name}와의 전투!\n\n" \
+                       "───────────────────\n" \
+                       "DM으로 행동을 입력해주세요.\n\n" \
+                       "형식:\n" \
+                       "  [공격/크리쳐]\n" \
+                       "  [회복/아이디]\n" \
+                       "  [방어/아이디]\n" \
+                       "  [이동/좌표]\n\n" \
+                       "입력 대기: 5분\n" \
+                       "───────────────────"
+        
+        listener.post_public(announcement)
+        battle_announced = true
+        puts "[전투봇] #{battle_round}라운드 안내 송출"
+      end
+      
       conv_uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/conversations")
       conv_http = Net::HTTP.new(conv_uri.host, conv_uri.port)
       conv_http.use_ssl = true
@@ -111,7 +135,7 @@ loop do
         
         if conv['last_status']
           status_id = conv['last_status']['id']
-          next if processed_messages[username] == status_id
+          next if processed_messages[username]
           
           text = conv['last_status']['content'].gsub(/<[^>]*>/, '')
           
@@ -138,17 +162,29 @@ loop do
             puts "[전투봇] #{username} → [#{action_type}/#{action_target}]"
             
             listener.send_dm(username, "확인, 대기해주세요.")
-            processed_messages[username] = status_id
+            processed_messages[username] = true
+            
+            # 모든 러너가 입력했으면 전투 진행
+            if battle_actions.size >= total_runners
+              creature_config = creature_sheet.read_creature_config
+              creature_name = creature_config[:name] || "크리쳐"
+              listener.post_public("[#{battle_round}라운드] #{creature_name} 전투 진행 중...\n\n(정산 중)")
+              battle_active = false
+              puts "[전투봇] 모든 러너 입력 완료 - 전투 진행"
+            end
           end
         end
       end
       
       # 5분 경과 체크
       if (Time.now - battle_start_time) >= 300
-        listener.post_public("[#{battle_round}라운드 자동 정산]\n\n입력: #{battle_actions.size}명\n\n정산 완료!")
+        creature_config = creature_sheet.read_creature_config
+        creature_name = creature_config[:name] || "크리쳐"
+        listener.post_public("[#{battle_round}라운드] 시간 초과\n\n#{creature_name} 전투 정산 완료!")
         battle_active = false
         battle_actions = {}
         processed_messages = {}
+        battle_announced = false
         puts "[전투봇] #{battle_round}라운드 5분 경과 - 자동 정산"
       end
     end
