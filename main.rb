@@ -45,7 +45,6 @@ auto_next_round_timer = nil
 
 loop do
   begin
-    # 자동 다음라운드 진행
     if auto_next_round_timer && (Time.now - auto_next_round_timer) >= 3
       battle_round = battle_round.to_i + 1
       battle_active = true
@@ -57,7 +56,6 @@ loop do
       puts "[전투봇] #{battle_round}라운드 자동 시작"
     end
     
-    # 공개 타임라인 체크
     uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/timelines/public?local=true")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
@@ -78,8 +76,7 @@ loop do
       content = status['content'].gsub(/<[^>]*>/, '')
       
       if content.include?('[전투시작]') && !battle_active
-        mentions = status['mentions']
-        usernames = mentions.map { |m| m['acct'] }.select { |u| !u.empty? }
+        usernames = content.scan(/@(\w+)/).flatten.uniq
         total_runners = usernames.size
         
         if total_runners == 0
@@ -117,7 +114,6 @@ loop do
       end
     end
     
-    # 전투 중 DM 체크
     if battle_active
       if !battle_announced
         creature_stats = creature_sheet.read_creature_stats
