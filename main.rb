@@ -1,4 +1,4 @@
-# main.rb (전체 재작성)
+# main.rb (완전 새로 작성)
 $stdout.sync = true
 $stderr.sync = true
 
@@ -18,7 +18,7 @@ VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
 ACTION_TIMEOUT    = 300
 
-def start_battle(round, runner_sheet, creature_sheet, mastodon, listener)
+def start_battle(round, runner_sheet, creature_sheet, listener)
   puts "[전투봇] #{round}라운드 시작"
 
   base_stats = runner_sheet.read_base_stats
@@ -40,11 +40,11 @@ def start_battle(round, runner_sheet, creature_sheet, mastodon, listener)
   creature_sheet.write_battle_state(round, 'waiting_actions')
 
   runner_tags = a_state.map { |s| "@#{s[:name]}" }.join(" ")
-  mastodon.post_public(
+  listener.post_public(
     "[#{round}라운드 시작]\n\n" \
     "#{runner_tags}\n\n" \
     "DM으로 행동을 입력해주세요.\n" \
-    "[공격/(크리쳐 이름)]\n" \
+    "[공격/(크리쳐이름)]\n" \
     "[회복/(아군이름)]\n" \
     "[방어/(아군이름)]\n" \
     "[스킬/(스킬명)]\n" \
@@ -59,21 +59,19 @@ def start_battle(round, runner_sheet, creature_sheet, mastodon, listener)
     runner_state: a_state,
     creature_base: creature_base,
     creature_name: creature_config[:name],
-    started_at: Time.now
+    started_at: Time.now,
+    actions: {}
   }
 end
 
-def collect_actions(battle_state, mastodon)
+def collect_actions(battle_state, listener)
   round = battle_state[:round]
   started_at = battle_state[:started_at]
   runner_state = battle_state[:runner_state]
+  actions = battle_state[:actions]
 
-  actions = {}
   runner_state.each do |r|
-    actions[r[:name]] = {
-      action: '',
-      target: ''
-    }
+    actions[r[:name]] ||= { action: '', target: '' }
   end
 
   end_time = started_at + ACTION_TIMEOUT
@@ -81,6 +79,24 @@ def collect_actions(battle_state, mastodon)
   while Time.now < end_time
     remaining = (end_time - Time.now).ceil
     puts "[전투봇] 행동 입력 대기... #{remaining}초"
+
+    conversations = listener.get_conversations
+    conversations.each do |conv|
+      sender = conv['accounts'].first
+      next unless sender
+
+      if conv['last_status']
+        text = conv['last_status']['content']
+        action = listener.parse_action(text)
+        
+        if action
+          username = sender['username']
+          actions[username] = action
+          puts "[전투봇] #{username} → [#{action[:type]}/#{action[:target]}]"
+        end
+      end
+    end
+
     sleep(10)
   end
 
@@ -88,13 +104,14 @@ def collect_actions(battle_state, mastodon)
   actions
 end
 
-def settle_battle(battle_state, actions, runner_sheet, creature_sheet, view_sheet, mastodon)
+def settle_battle(battle_state, listener, runner_sheet, creature_sheet, view_sheet)
   round = battle_state[:round]
   base_stats = battle_state[:base_stats]
   skill_data = battle_state[:skill_data]
   a_state = battle_state[:runner_state]
   creature_base = battle_state[:creature_base]
   creature_name = battle_state[:creature_name]
+  actions = battle_state[:actions]
 
   puts "[전투봇] #{round}라운드 전체 정산 시작"
 
@@ -144,7 +161,7 @@ def settle_battle(battle_state, actions, runner_sheet, creature_sheet, view_shee
   parent_id = nil
   toots.each_with_index do |text, i|
     sleep(1)
-    parent_id = i == 0 ? mastodon.post_public(text) : mastodon.reply_public(text, parent_id)
+    parent_id = i == 0 ? listener.post_public(text) : listener.reply_public(text, parent_id)
   end
 
   creature_sheet.write_battle_state(round, 'completed')
@@ -165,49 +182,44 @@ view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
 listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
 
 account_info = listener.get_account_info
-gm_account_id = account_info['id'] if account_info
+bot_account_id = account_info['id'] if account_info
 
 battle_state = nil
 poll_interval = 30
 
 loop do
   begin
-    notifications = listener.get_notifications
+    conversations = listener.get_conversations
     
-    notifications.each do |notif|
-      next unless notif['type'] == 'mention'
-      next if notif['account']['id'].to_s == gm_account_id.to_s
+    conversations.each do |conv|
+      sender = conv['accounts'].first
+      next unless sender
+      next if sender['id'].to_s == bot_account_id.to_s
 
-      content = notif['status']['content']
-      
-      if content.include?('[전투시작]')
-        round = content.match(/\[(\d+)\]/)&.[](1)&.to_i || 1
-        battle_state = start_battle(round, runner_sheet, creature_sheet, listener, listener)
-        
-      elsif content.include?('[전투종료]')
-        if battle_state
-          creature_sheet.write_battle_state(0, 'terminated')
-          listener.post_public("[전투 강제 종료]\n\n모든 전투가 종료되었습니다.")
-          battle_state = nil
-        end
-        
-      elsif battle_state && battle_state[:status] == 'waiting_actions'
-        if content.match?(/\[(공격|회복|방어|스킬|이동)\/(.+)\]/)
-          match = content.match(/\[(공격|회복|방어|스킬|이동)\/(.+)\]/)
-          action_type = match[1]
-          action_target = match[2]
+      if conv['last_status']
+        content = conv['last_status']['content']
+
+        if content.include?('[전투시작]')
+          match = content.match(/\[(\d+)\]/)
+          round = match ? match[1].to_i : 1
+          mentions = content.scan(/@(\w+)/)
+          puts "[전투봇] 전투 시작 - #{mentions.size}명 참여"
+          battle_state = start_battle(round, runner_sheet, creature_sheet, listener)
           
-          # DM으로 받은 행동 저장
-          puts "[전투봇] #{notif['account']['username']} → [#{action_type}/#{action_target}]"
+        elsif content.include?('[전투종료]')
+          if battle_state
+            creature_sheet.write_battle_state(0, 'terminated')
+            listener.post_public("[전투 강제 종료]\n\n모든 전투가 종료되었습니다.")
+            battle_state = nil
+          end
         end
       end
     end
 
-    if battle_state
+    if battle_state && battle_state[:started_at]
       if (Time.now - battle_state[:started_at]) > ACTION_TIMEOUT
-        actions = {}
-        battle_state[:runner_state].each { |r| actions[r[:name]] = { action: '', target: '' } }
-        settle_battle(battle_state, actions, runner_sheet, creature_sheet, view_sheet, listener)
+        collect_actions(battle_state, listener)
+        settle_battle(battle_state, listener, runner_sheet, creature_sheet, view_sheet)
         battle_state = nil
       end
     end
