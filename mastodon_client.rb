@@ -1,53 +1,106 @@
-# mastodon_client.rb
 require 'net/http'
 require 'json'
 require 'uri'
 
 class MastodonClient
   def initialize(base_url, token)
-    @base_url = base_url
+    @base_url = base_url.to_s.sub(%r{/\z}, '')
     @token = token
   end
 
   def post_public(text)
-    uri = URI("#{@base_url}/api/v1/statuses")
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = true
-
-    req = Net::HTTP::Post.new(uri)
-    req['Authorization'] = "Bearer #{@token}"
-    req['Content-Type'] = 'application/json'
-    req.body = { status: text, visibility: 'public' }.to_json
-
-    res = http.request(req)
-    data = JSON.parse(res.body)
-    puts "[Mastodon] 툿 전송 완료: #{data['id']}"
-    data['id']
-  rescue => e
-    puts "[Mastodon 오류] #{e.message}"
-    nil
+    request_status(
+      status: text,
+      visibility: 'public'
+    )
   end
 
-  def reply_public(text, in_reply_to_id)
-    uri = URI("#{@base_url}/api/v1/statuses")
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = true
-
-    req = Net::HTTP::Post.new(uri)
-    req['Authorization'] = "Bearer #{@token}"
-    req['Content-Type'] = 'application/json'
-    req.body = {
+  def reply_public(in_reply_to_id, text)
+    request_status(
       status: text,
       visibility: 'public',
       in_reply_to_id: in_reply_to_id
-    }.to_json
+    )
+  end
+
+  def send_dm(username, text)
+    request_status(
+      status: "@#{username} #{text}",
+      visibility: 'direct'
+    )
+  end
+
+  def public_timeline(local: true, limit: 20)
+    query = URI.encode_www_form(local: local, limit: limit)
+    request_get("/api/v1/timelines/public?#{query}") || []
+  end
+
+  def conversations(limit: 20)
+    query = URI.encode_www_form(limit: limit)
+    request_get("/api/v1/conversations?#{query}") || []
+  end
+
+  private
+
+  def request_get(path)
+    uri = URI("#{@base_url}#{path}")
+
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = uri.scheme == 'https'
+    http.open_timeout = 10
+    http.read_timeout = 30
+
+    req = Net::HTTP::Get.new(uri)
+    req['Authorization'] = "Bearer #{@token}"
 
     res = http.request(req)
-    data = JSON.parse(res.body)
-    puts "[Mastodon] 스레드 툿 전송 완료: #{data['id']}"
-    data['id']
+    parse_json_response(res)
   rescue => e
-    puts "[Mastodon 오류] #{e.message}"
+    puts "[Mastodon 오류] GET #{path}: #{e.class}: #{e.message}"
+    nil
+  end
+
+  def request_status(payload)
+    uri = URI("#{@base_url}/api/v1/statuses")
+
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = uri.scheme == 'https'
+    http.open_timeout = 10
+    http.read_timeout = 30
+
+    req = Net::HTTP::Post.new(uri)
+    req['Authorization'] = "Bearer #{@token}"
+    req['Content-Type'] = 'application/json'
+    req.body = payload.to_json
+
+    res = http.request(req)
+
+    unless res.code.start_with?('2')
+      puts "[Mastodon 오류] HTTP #{res.code}"
+      puts res.body
+      return nil
+    end
+
+    data = JSON.parse(res.body)
+    data['id']
+  rescue JSON::ParserError => e
+    puts "[Mastodon 오류] JSON 파싱 실패: #{e.message}"
+    nil
+  rescue => e
+    puts "[Mastodon 오류] POST status: #{e.class}: #{e.message}"
+    nil
+  end
+
+  def parse_json_response(res)
+    unless res.code.start_with?('2')
+      puts "[Mastodon 오류] HTTP #{res.code}"
+      puts res.body
+      return nil
+    end
+
+    JSON.parse(res.body)
+  rescue JSON::ParserError => e
+    puts "[Mastodon 오류] JSON 파싱 실패: #{e.message}"
     nil
   end
 end
