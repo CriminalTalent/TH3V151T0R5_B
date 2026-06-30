@@ -68,24 +68,24 @@ class SheetManager
     puts "[Sheet 오류] clear_corrections: #{e.message}"
   end
 
-  # 스탯: A=캐릭터명 B=건강 C=마법능력 D=내구도 E=민첩 F=기술 G=행운
-  #       H=스킬1 I=스킬2 J=facing K=기숙사 L=패시브선택
+  # 스탯: A=ID B=이름 C=기숙사 D=패시브선택 E=건강 F=내구도 G=마법능력
+  #       H=민첩 I=기술 J=행운 K=스킬1 L=스킬2 M=facing
   def read_base_stats
-    rows = read("스탯!A2:L30")
+    rows = read("스탯!A2:M30")
     rows.map do |r|
       {
-        name:     r[0].to_s.strip,
-        hp:       r[1].to_i,
-        atk:      r[2].to_i,
-        dur:      r[3].to_i,
-        agi:      r[4].to_i,
-        tec:      r[5].to_i,
-        luck:     r[6].to_i,
-        skill1:   r[7].to_s.strip,
-        skill2:   r[8].to_s.strip,
-        facing:   r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip,
-        house:    r[10].to_s.strip,
-        passive:  r[11].to_s.strip.empty? ? '1' : r[11].to_s.strip
+        name:     r[1].to_s.strip,
+        house:    r[2].to_s.strip,
+        passive:  r[3].to_s.strip.empty? ? '1' : r[3].to_s.strip,
+        hp:       r[4].to_i,
+        dur:      r[5].to_i,
+        atk:      r[6].to_i,
+        agi:      r[7].to_i,
+        tec:      r[8].to_i,
+        luck:     r[9].to_i,
+        skill1:   r[10].to_s.strip,
+        skill2:   r[11].to_s.strip,
+        facing:   r[12].to_s.strip.empty? ? '하' : r[12].to_s.strip
       }
     end.reject { |r| r[:name].empty? }
   end
@@ -251,5 +251,17 @@ class SheetManager
       rows[i] = [s[:name], s[:pos], bar, '', s[:max_hp]]
     end
     write(range, rows)
+  end
+
+  def set_house_and_passive(character_name, house, passive)
+    rows = read("스탯!A2:M30")
+    rows.each_with_index do |r, idx|
+      next if r[0].to_s.strip != character_name
+      row_num = idx + 2
+      write("스탯!C#{row_num}", [[house]])
+      write("스탯!D#{row_num}", [[passive]])
+      return true
+    end
+    false
   end
 end
