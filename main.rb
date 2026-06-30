@@ -92,4 +92,59 @@ def settle_battle(state, mastodon, runner_sheet, creature_sheet, view_sheet, sta
   state_mgr.write_cooldowns(updated_cooldowns)
   state_mgr.write_buffs(updated_buffs)
 
-  a_updated = updated_states.select { |name,
+  a_updated = updated_states.select { |name, _| a_state.any? { |s| s[:name] == name } }.values
+  creature_updated = updated_states[creature_name]
+
+  runner_sheet.update_runner_state(a_updated)
+  creature_sheet.update_creature_state(creature_updated)
+  view_sheet.update_view_map(a_updated + [creature_updated])
+  view_sheet.update_view_team(a_updated)
+  view_sheet.update_view_creature(creature_updated)
+
+  puts "[전투봇] 현황 + 맵 업데이트 완료"
+
+  toots = TootBuilder.new(round, log).build
+  puts "[전투봇] 툿 #{toots.size}개 생성"
+
+  parent_id = nil
+  toots.each_with_index do |text, i|
+    sleep(1)
+    parent_id = i == 0 ? mastodon.post_public(text) : mastodon.reply_public(text, parent_id)
+  end
+
+  state_mgr.clear_state
+  puts "[전투봇] #{round}라운드 전체 정산 완료"
+end
+
+puts "[전투봇] 시작"
+
+runner_sheet   = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
+creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
+view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
+mastodon       = MastodonClient.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
+state_mgr      = StateManager.new
+
+battle_state = nil
+
+loop do
+  begin
+    unless battle_state
+      puts "[전투봇] 대기 중... (마스토돈에서 !전투 N 입력)"
+      sleep(POLL_INTERVAL)
+      next
+    end
+
+    if battle_state[:status] == 'waiting_commands'
+      puts "[전투봇] 커맨드 대기 중... (30초 후 자동 정산)"
+      sleep(30)
+      settle_battle(battle_state, mastodon, runner_sheet, creature_sheet, view_sheet, state_mgr)
+      battle_state = nil
+    end
+
+  rescue => e
+    puts "[전투봇 오류] #{e.class}: #{e.message}"
+    puts e.backtrace.first(8)
+  end
+
+  sleep(POLL_INTERVAL)
+end
