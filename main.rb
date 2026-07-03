@@ -55,8 +55,8 @@ auto_next_round_timer = nil
 battle_creature = nil
 dm_mode = false
 passive_ctx = nil
+battle_thread_reply_id = nil
 
-broadcast = ->(text) { dm_mode ? listener.post_direct(text) : listener.post_public(text) }
 
 def new_passive_ctx
   {
@@ -74,6 +74,38 @@ def clean_html(text)
            .gsub(/<p[^>]*>/i, '')
            .gsub(/<[^>]*>/, '')
            .strip
+end
+
+def post_status_raw(text, visibility:, reply_to_id: nil)
+  uri = URI("#{ENV['MASTODON_BASE_URL']}/api/v1/statuses")
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.open_timeout = 10
+  http.read_timeout = 10
+
+  req = Net::HTTP::Post.new(uri)
+  req['Authorization'] = "Bearer #{ENV['BATTLE_TOKEN']}"
+  req.set_form_data(
+    status: text,
+    visibility: visibility,
+    in_reply_to_id: reply_to_id
+  )
+
+  res = http.request(req)
+  unless res.code.to_i.between?(200, 299)
+    puts "[전투봇 오류] 툿 발송 실패: #{res.code} #{res.body}"
+    return nil
+  end
+
+  JSON.parse(res.body)
+rescue => e
+  puts "[전투봇 오류] 툿 발송 예외: #{e.class}: #{e.message}"
+  nil
+end
+
+def post_battle_thread(text, dm_mode, reply_id)
+  visibility = dm_mode ? 'direct' : 'public'
+  post_status_raw(text, visibility: visibility, reply_to_id: reply_id)
 end
 
 def status_author_username(status)
@@ -624,6 +656,7 @@ loop do
         processed_messages = {}
         auto_next_round_timer = nil
         passive_ctx = new_passive_ctx
+        battle_thread_reply_id = dm_id
 
         battle_creature = current_creature(creature_sheet)
         battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
@@ -644,7 +677,8 @@ loop do
         battle_creature = nil
         passive_ctx = nil
 
-        broadcast.call("#{runner_tags}\n\n[전투 강제 종료]")
+        response = post_battle_thread("#{runner_tags}\n\n[전투 강제 종료]", dm_mode, battle_thread_reply_id)
+        battle_thread_reply_id = response['id'] if response && response['id']
         processed_dm_ids.add(dm_id)
         dm_mode = false
         puts "[전투봇] 전투 종료 (DM)"
@@ -692,6 +726,7 @@ loop do
         snapshot_current_notification_ids(processed_notification_ids)
         auto_next_round_timer = nil
         passive_ctx = new_passive_ctx
+        battle_thread_reply_id = dm_id
 
         battle_creature = current_creature(creature_sheet)
         battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
@@ -709,7 +744,7 @@ loop do
         battle_creature = nil
         passive_ctx = nil
 
-        broadcast.call(dm_mode && was_active ? "#{runner_tags}\n\n[전투 강제 종료]" : "[전투 강제 종료]")
+        response = post_battle_thread(dm_mode && was_active ? "#{runner_tags}\n\n[전투 강제 종료]" : "[전투 강제 종료]")
         dm_mode = false
         puts "[전투봇] 전투 종료"
       end
@@ -734,7 +769,8 @@ loop do
                        "입력 대기: 5분\n" \
                        "───────────────────"
 
-        broadcast.call(announcement)
+        response = post_battle_thread(announcement, dm_mode, battle_thread_reply_id)
+        battle_thread_reply_id = response['id'] if response && response['id']
         battle_announced = true
         snapshot_current_dm_ids(processed_dm_ids)
 
@@ -851,7 +887,8 @@ loop do
           timeout: round_timeout && !round_done
         )
 
-        broadcast.call(result)
+        response = post_battle_thread(result, dm_mode, battle_thread_reply_id)
+        battle_thread_reply_id = response['id'] if response && response['id']
 
         battle_active = false
 
@@ -862,6 +899,7 @@ loop do
           auto_next_round_timer = nil
           battle_creature = nil
           passive_ctx = nil
+          battle_thread_reply_id = nil
           dm_mode = false
           puts "[전투봇] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
         else
