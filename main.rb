@@ -36,7 +36,7 @@ creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
 view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
 listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
 
-puts "[전투봇] 초기화 완료 - 공개 타임라인 모니터링"
+puts "[전투봇] 초기화 완료 - 공개 타임라인 + DM 모니터링"
 
 processed_statuses = Set.new
 processed_dm_ids = Set.new
@@ -52,6 +52,10 @@ runner_names = []
 runner_tags = ""
 auto_next_round_timer = nil
 battle_creature = nil
+dm_mode = false
+
+# dm_mode면 단체 DM, 아니면 퍼블릭 툿 (text에는 runner_tags 멘션이 포함되어야 함)
+broadcast = ->(text) { dm_mode ? listener.post_direct(text) : listener.post_public(text) }
 
 def clean_html(text)
   text.to_s.gsub(/<[^>]*>/, '').strip
@@ -300,7 +304,7 @@ end
 # ── 재시작 시 과거 툿 재처리 방지: 현재 타임라인/DM을 처리 완료로 스냅샷 ──
 fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
 snapshot_current_dm_ids(processed_dm_ids)
-puts "[전투봇] 기존 툿 #{processed_statuses.size}건 스냅샷 완료 (재발동 방지)"
+puts "[전투봇] 기존 툿 스냅샷 완료 (재발동 방지)"
 
 loop do
   begin
@@ -317,6 +321,64 @@ loop do
       puts "[전투봇] #{battle_round}라운드 자동 시작"
     end
 
+    conversations = fetch_conversations
+
+    # ── DM으로 전투시작/전투종료 (테스트 모드) ──
+    conversations.each do |conv|
+      sender = conv['accounts'].first
+      next unless sender
+
+      last_status = conv['last_status']
+      next unless last_status
+
+      dm_id = last_status['id']
+      next if processed_dm_ids.include?(dm_id)
+
+      content = clean_html(last_status['content'])
+
+      if content.include?('[전투시작]') && !battle_active
+        usernames = extract_usernames_from_status(last_status, content, BOT_USERNAME)
+        usernames = (usernames - [sender['username']]).uniq
+        usernames = [sender['username']] if usernames.empty?
+        total_runners = usernames.size
+
+        runner_names = usernames
+        runner_tags = runner_names.map { |u| "@#{u}" }.join(" ")
+
+        dm_mode = true
+        battle_active = true
+        battle_announced = false
+        battle_start_time = Time.now
+        battle_round = content.match(/\[(\d+)\]/)&.[](1) || "1"
+        battle_actions = {}
+        processed_messages = {}
+        auto_next_round_timer = nil
+
+        battle_creature = current_creature(creature_sheet)
+        battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
+        view_sheet.update_creature_state(battle_creature)
+
+        processed_dm_ids.add(dm_id)
+        snapshot_current_dm_ids(processed_dm_ids)
+
+        puts "[전투봇] (DM 테스트) #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{battle_creature[:name]}"
+
+      elsif content.include?('[전투종료]') && battle_active
+        battle_active = false
+        battle_actions = {}
+        processed_messages = {}
+        battle_announced = false
+        auto_next_round_timer = nil
+        battle_creature = nil
+
+        broadcast.call("#{runner_tags}\n\n[전투 강제 종료]")
+        processed_dm_ids.add(dm_id)
+        dm_mode = false
+        puts "[전투봇] 전투 종료 (DM)"
+      end
+    end
+
+    # ── 공개 타임라인 전투시작/전투종료 (기존 방식) ──
     fetch_public_statuses.each do |status|
       status_id = status['id']
       next if processed_statuses.include?(status_id)
@@ -344,6 +406,7 @@ loop do
         runner_names = usernames
         runner_tags = runner_names.map { |u| "@#{u}" }.join(" ")
 
+        dm_mode = false
         battle_active = true
         battle_announced = false
         battle_start_time = Time.now
@@ -360,6 +423,7 @@ loop do
         puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{battle_creature[:name]}"
 
       elsif content.include?('[전투종료]')
+        was_active = battle_active
         battle_active = false
         battle_actions = {}
         processed_messages = {}
@@ -367,7 +431,8 @@ loop do
         auto_next_round_timer = nil
         battle_creature = nil
 
-        listener.post_public("[전투 강제 종료]")
+        broadcast.call(dm_mode && was_active ? "#{runner_tags}\n\n[전투 강제 종료]" : "[전투 강제 종료]")
+        dm_mode = false
         puts "[전투봇] 전투 종료"
       end
 
@@ -390,13 +455,13 @@ loop do
                        "입력 대기: 5분\n" \
                        "───────────────────"
 
-        listener.post_public(announcement)
+        broadcast.call(announcement)
         battle_announced = true
 
-        puts "[전투봇] #{battle_round}라운드 안내 송출"
+        puts "[전투봇] #{battle_round}라운드 안내 송출#{dm_mode ? ' (DM)' : ''}"
       end
 
-      fetch_conversations.each do |conv|
+      conversations.each do |conv|
         sender = conv['accounts'].first
         next unless sender
 
@@ -409,13 +474,15 @@ loop do
         dm_id = last_status['id']
         next if processed_dm_ids.include?(dm_id)
 
+        text = clean_html(last_status['content'])
+        next if text.include?('[전투시작]') || text.include?('[전투종료]')
+
         if processed_messages[username]
           listener.send_dm(username, "이미 이번 라운드 행동을 제출했습니다.")
           processed_dm_ids.add(dm_id)
           next
         end
 
-        text = clean_html(last_status['content'])
         match = text.match(/\[(공격|회복|방어|이동)\/(.+?)\]/)
 
         unless match
@@ -482,7 +549,7 @@ loop do
           timeout: round_timeout && !round_done
         )
 
-        listener.post_public(result)
+        broadcast.call(result)
 
         battle_active = false
 
@@ -492,6 +559,7 @@ loop do
         if creature_dead || all_runners_dead
           auto_next_round_timer = nil
           battle_creature = nil
+          dm_mode = false
           puts "[전투봇] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
         else
           auto_next_round_timer = Time.now
