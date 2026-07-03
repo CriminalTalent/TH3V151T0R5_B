@@ -203,6 +203,38 @@ def current_creature(creature_sheet)
   stats
 end
 
+def creature_from_start_content(content, creature_sheet)
+  name = content.to_s.match(/크리쳐\s*[「『](.+?)[」』]\s*출현/)&.[](1)
+  name = content.to_s.match(/상대[:：]\s*([^\n]+)/)&.[](1) if name.to_s.strip.empty?
+  name = name.to_s.strip
+  name = '크리쳐' if name.empty?
+
+  pos = content.to_s.match(/위치[:：]\s*([A-G][1-8])/i)&.[](1)
+  pos = content.to_s.match(/@\s*([A-G][1-8])/i)&.[](1) if pos.to_s.strip.empty?
+  pos = pos.to_s.strip.upcase
+
+  stats = creature_sheet.read_creature_stats(name)
+  stats = {
+    name: name,
+    hp: 200,
+    max_hp: 200,
+    dur: 10,
+    atk: 10,
+    agi: 0,
+    tec: 0,
+    luck: 0,
+    pos: 'D4',
+    status: ''
+  } unless stats
+
+  stats[:name] = name
+  stats[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
+  stats
+rescue => e
+  puts "[전투봇] 전투시작문 크리쳐 파싱 실패: #{e.class}: #{e.message}"
+  current_creature(creature_sheet)
+end
+
 def extract_usernames_from_status(status, content, bot_username)
   usernames = status['mentions'].to_a.map { |m| m['username'].to_s.strip }.reject(&:empty?).uniq
   usernames = content.scan(/@([A-Za-z0-9_]+)/).flatten.uniq if usernames.empty?
@@ -658,9 +690,10 @@ loop do
         passive_ctx = new_passive_ctx
         battle_thread_reply_id = dm_id
 
-        battle_creature = current_creature(creature_sheet)
+        battle_creature = creature_from_start_content(content, creature_sheet)
         battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
         # 현재 위치 시트에는 크리쳐/전투상태 탭이 없을 수 있으므로 메모리 상태만 사용합니다.
+        puts "[전투봇] 크리쳐 확정: #{battle_creature[:name]} @#{battle_creature[:pos]} HP=#{battle_creature[:hp]}/#{battle_creature[:max_hp]}"
 
         processed_dm_ids.add(dm_id)
         snapshot_current_dm_ids(processed_dm_ids)
@@ -728,9 +761,10 @@ loop do
         passive_ctx = new_passive_ctx
         battle_thread_reply_id = dm_id
 
-        battle_creature = current_creature(creature_sheet)
+        battle_creature = creature_from_start_content(content, creature_sheet)
         battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
         # 현재 위치 시트에는 크리쳐/전투상태 탭이 없을 수 있으므로 메모리 상태만 사용합니다.
+        puts "[전투봇] 크리쳐 확정: #{battle_creature[:name]} @#{battle_creature[:pos]} HP=#{battle_creature[:hp]}/#{battle_creature[:max_hp]}"
 
         puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{battle_creature[:name]} @#{battle_creature[:pos]}"
 
@@ -914,5 +948,5 @@ loop do
     puts e.backtrace.first(5)
   end
 
-  sleep(10)
+  sleep(3)
 end
