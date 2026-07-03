@@ -185,6 +185,51 @@ def runner_alive?(runner)
   runner && runner[:hp].to_i > 0
 end
 
+def build_fallback_runner_state(runner_names, runner_sheet, default_pos)
+  base_stats = runner_sheet.read_base_stats
+
+  runner_names.map do |name|
+    stat = base_stats.find { |s| s[:name].to_s == name.to_s || s[:id].to_s == name.to_s }
+    hp = stat ? stat[:hp].to_i : 50
+    hp = 50 if hp <= 0
+
+    {
+      name:    name,
+      pos:     default_pos.to_s.strip.empty? ? 'D4' : default_pos.to_s.strip.upcase,
+      hp:      hp,
+      max_hp:  hp,
+      status:  '',
+      facing:  stat && stat[:facing].to_s.strip.empty? == false ? stat[:facing] : '하'
+    }
+  end
+rescue => e
+  puts "[전투봇] fallback runner state 생성 실패: #{e.class}: #{e.message}"
+  runner_names.map do |name|
+    {
+      name:    name,
+      pos:     default_pos.to_s.strip.empty? ? 'D4' : default_pos.to_s.strip.upcase,
+      hp:      50,
+      max_hp:  50,
+      status:  '',
+      facing:  '하'
+    }
+  end
+end
+
+def merge_runner_state(view_sheet, runner_sheet, runner_names, default_pos)
+  current = view_sheet.read_runner_state
+  current = [] unless current.is_a?(Array)
+
+  fallback = build_fallback_runner_state(runner_names, runner_sheet, default_pos)
+
+  fallback.each do |base|
+    found = current.find { |r| r[:name].to_s == base[:name].to_s }
+    current << base unless found
+  end
+
+  current.select { |r| runner_names.include?(r[:name].to_s) }
+end
+
 def adjacent_move?(from, to)
   fc, fr = BattleCalculator.parse_pos(from.to_s.strip.upcase)
   tc, tr = BattleCalculator.parse_pos(to.to_s.strip.upcase)
@@ -195,11 +240,14 @@ def adjacent_move?(from, to)
   dx <= 1 && dy <= 1 && (dx + dy) > 0
 end
 
-def validate_action(username, action_type, action_target, runner_names, view_sheet, creature)
-  runner_state = view_sheet.read_runner_state
-  actor = runner_state.find { |r| r[:name] == username }
+def validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, creature)
+  runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
+  actor = runner_state.find { |r| r[:name].to_s == username.to_s }
 
-  return [false, "현재 행동할 수 없는 상태입니다."] unless runner_alive?(actor)
+  unless runner_alive?(actor)
+    puts "[전투봇] 행동 불가: @#{username}, actor=#{actor.inspect}, runner_names=#{runner_names.inspect}"
+    return [false, "현재 행동할 수 없는 상태입니다."]
+  end
 
   case action_type
   when '공격'
@@ -238,7 +286,7 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   [true, nil]
 end
 
-def record_battle_action(username, text, battle_actions, processed_messages, processed_id_set, processed_id, runner_names, view_sheet, battle_creature, listener)
+def record_battle_action(username, text, battle_actions, processed_messages, processed_id_set, processed_id, runner_names, view_sheet, runner_sheet, battle_creature, listener)
   puts "[전투봇] 행동 수신: @#{username} -> #{text}"
 
   if processed_messages[username]
@@ -259,7 +307,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   action_type = match[1]
   action_target = match[2].strip
 
-  valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, battle_creature)
+  valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, battle_creature)
 
   unless valid
     puts "[전투봇] 행동 검증 실패: @#{username} -> #{error_message}"
@@ -272,8 +320,8 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     coord = LOCATION_MAP[action_target] || action_target
     coord = coord.to_s.strip.upcase
 
-    runner_state = view_sheet.read_runner_state
-    runner = runner_state.find { |r| r[:name] == username }
+    runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, battle_creature[:pos])
+    runner = runner_state.find { |r| r[:name].to_s == username.to_s }
 
     if runner
       runner[:pos] = coord
@@ -295,9 +343,9 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   listener.send_dm(username, "확인, 대기해주세요.")
 end
 
-def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creature, ctx)
-  runner_state = view_sheet.read_runner_state
-  base_stats   = creature_sheet.read_base_stats
+def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, view_sheet, creature, ctx)
+  runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
+  base_stats   = runner_sheet.read_base_stats
   stats_of = ->(name) { base_stats.find { |s| s[:name] == name } || {} }
   state_of = ->(name) { runner_state.find { |r| r[:name] == name } }
 
@@ -732,6 +780,7 @@ loop do
           notification_id,
           runner_names,
           view_sheet,
+          runner_sheet,
           battle_creature,
           listener
         )
@@ -776,6 +825,7 @@ loop do
           dm_id,
           runner_names,
           view_sheet,
+          runner_sheet,
           battle_creature,
           listener
         )
@@ -786,7 +836,7 @@ loop do
 
       if round_done || round_timeout
         passive_ctx[:round] = battle_round.to_i
-        log, runner_state = settle_round(battle_actions, runner_names, creature_sheet, view_sheet, battle_creature, passive_ctx)
+        log, runner_state = settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, view_sheet, battle_creature, passive_ctx)
         # 현재 위치 시트에는 크리쳐/전투상태 탭이 없을 수 있으므로 메모리 상태만 사용합니다.
 
         result = build_result_text(
