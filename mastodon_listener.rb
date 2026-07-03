@@ -30,6 +30,14 @@ class MastodonListener
     )
   end
 
+  # 텍스트에 이미 @멘션이 포함된 단체 DM (테스트 모드용)
+  def post_direct(text)
+    request_status(
+      status: text,
+      visibility: 'direct'
+    )
+  end
+
   private
 
   def request_status(payload)
