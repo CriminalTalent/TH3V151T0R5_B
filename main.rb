@@ -53,9 +53,19 @@ runner_tags = ""
 auto_next_round_timer = nil
 battle_creature = nil
 dm_mode = false
+passive_ctx = nil
 
-# dm_mode면 단체 DM, 아니면 퍼블릭 툿 (text에는 runner_tags 멘션이 포함되어야 함)
 broadcast = ->(text) { dm_mode ? listener.post_direct(text) : listener.post_public(text) }
+
+def new_passive_ctx
+  {
+    round: 1,
+    prev_took_damage: {},
+    prev_action: {},
+    slytherin_luck: Hash.new(0),
+    guard_used: {}
+  }
+end
 
 def clean_html(text)
   text.to_s.gsub(/<[^>]*>/, '').strip
@@ -131,6 +141,17 @@ def runner_alive?(runner)
   runner && runner[:hp].to_i > 0
 end
 
+# 가로/세로/대각선 1칸 이동인지 판정 (현재 위치가 없으면 제한 없음)
+def adjacent_move?(from, to)
+  fc, fr = BattleCalculator.parse_pos(from.to_s.strip.upcase)
+  tc, tr = BattleCalculator.parse_pos(to.to_s.strip.upcase)
+  return true if fc.nil?
+  return false if tc.nil?
+  dx = (fc - tc).abs
+  dy = (fr - tr).abs
+  dx <= 1 && dy <= 1 && (dx + dy) > 0
+end
+
 def validate_action(username, action_type, action_target, runner_names, view_sheet, creature)
   runner_state = view_sheet.read_runner_state
   actor = runner_state.find { |r| r[:name] == username }
@@ -163,6 +184,10 @@ def validate_action(username, action_type, action_target, runner_names, view_she
       return [false, "이동 좌표가 올바르지 않습니다. A1~G8 범위로 입력해주세요."]
     end
 
+    unless adjacent_move?(actor[:pos], coord)
+      return [false, "이동은 가로/세로/대각선으로 1칸만 가능합니다. (현재 위치: #{actor[:pos]})"]
+    end
+
   else
     return [false, "형식이 올바르지 않습니다. [공격/크리쳐], [회복/아이디], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요."]
   end
@@ -170,8 +195,8 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   [true, nil]
 end
 
-# ── 라운드 정산: 회복 → 방어 → 공격 → 크리쳐 반격 ──
-def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creature)
+# ── 라운드 정산: 기숙사 패시브 → 회복 → 방어 → 공격 → 크리쳐 반격 ──
+def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creature, ctx)
   runner_state = view_sheet.read_runner_state
   base_stats   = creature_sheet.read_base_stats
   stats_of = ->(name) { base_stats.find { |s| s[:name] == name } || {} }
@@ -179,6 +204,66 @@ def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creat
 
   defended = {}
   log = []
+  took_damage = {}
+
+  atk_bonus  = Hash.new(0)
+  dur_bonus  = Hash.new(0)
+  tec_bonus  = Hash.new(0)
+  luck_bonus = Hash.new(0)
+
+  # 0) 기숙사 패시브 (라운드 시작 보정)
+  passive_lines = []
+  runner_names.each do |name|
+    s  = stats_of.call(name)
+    st = state_of.call(name)
+    next unless st && st[:hp].to_i > 0
+
+    case s[:house].to_s.strip
+    when '그리핀도르'
+      if s[:passive] == '2' && st[:max_hp].to_i > 0 && st[:hp].to_f < st[:max_hp].to_i * 0.5
+        b = (s[:atk].to_i * 0.5).ceil
+        atk_bonus[name] += b
+        passive_lines << "#{name}: [그리핀도르] 건강 50% 미만 — 마법능력 +#{b}"
+      end
+
+    when '슬리데린'
+      if s[:passive] == '1' && ctx[:round].to_i > 1 && !ctx[:prev_took_damage][name]
+        b = (s[:atk].to_i * 0.5).ceil
+        atk_bonus[name] += b
+        passive_lines << "#{name}: [슬리데린] 이전 라운드 무피해 — 마법능력 +#{b}"
+      end
+      if s[:passive] == '2' && ctx[:slytherin_luck][name].to_i > 0
+        luck_bonus[name] += ctx[:slytherin_luck][name]
+        passive_lines << "#{name}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][name]}"
+      end
+
+    when '래번클로'
+      if s[:passive] == '1' && !creature[:status].to_s.strip.empty?
+        b = (s[:atk].to_i * 0.5).ceil
+        atk_bonus[name] += b
+        passive_lines << "#{name}: [래번클로] 적 상태이상 감지 — 마법능력 +#{b}"
+      elsif s[:passive] == '2'
+        prev = ctx[:prev_action][name]
+        cur  = battle_actions[name]&.dig(:type)
+        if prev && cur && prev != cur
+          tec_bonus[name] += 10
+          passive_lines << "#{name}: [래번클로] 행동 분류 변경 — 기술 +10"
+        end
+      end
+
+    when '후플푸프'
+      if s[:passive] == '1' && ctx[:prev_took_damage][name]
+        b = (s[:dur].to_i * 0.5).ceil
+        dur_bonus[name] += b
+        passive_lines << "#{name}: [후플푸프] 이전 라운드 피격 — 내구도 +#{b}"
+      end
+    end
+  end
+
+  if passive_lines.any?
+    log << "[기숙사 패시브]"
+    log.concat(passive_lines)
+  end
 
   # 1) 회복
   battle_actions.each do |name, act|
@@ -190,7 +275,7 @@ def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creat
       log << "#{name} → #{target_name} 회복 실패 (이미 쓰러짐)"
       next
     end
-    heal = [stats_of.call(name)[:atk].to_i, 1].max
+    heal = [stats_of.call(name)[:atk].to_i + atk_bonus[name], 1].max
     before = target[:hp].to_i
     target[:hp] = [before + heal, target[:max_hp].to_i].min
     log << "#{name} → #{target_name} 회복 +#{target[:hp] - before}"
@@ -212,7 +297,7 @@ def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creat
     next unless actor && actor[:hp].to_i > 0
     s = stats_of.call(name)
 
-    unless BattleCalculator.hit?(s[:tec].to_i)
+    unless BattleCalculator.hit?(s[:tec].to_i + tec_bonus[name])
       log << "#{name}의 공격 → 빗나감!"
       next
     end
@@ -221,8 +306,9 @@ def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creat
       next
     end
 
-    crit = BattleCalculator.critical?(s[:luck].to_i)
-    base = crit ? s[:atk].to_i * 2 : s[:atk].to_i
+    crit = BattleCalculator.critical?(s[:luck].to_i + luck_bonus[name])
+    eff_atk = s[:atk].to_i + atk_bonus[name]
+    base = crit ? eff_atk * 2 : eff_atk
     dmg  = BattleCalculator.calc_damage(base, creature[:dur].to_i)
     creature[:hp] = [creature[:hp].to_i - dmg, 0].max
     log << "#{name}의 공격 → #{creature[:name]}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
@@ -233,30 +319,65 @@ def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creat
     living = runner_state.select { |r| r[:hp].to_i > 0 && runner_names.include?(r[:name]) }
     if living.any?
       target = living.sample
-      ts = stats_of.call(target[:name])
+      tname = target[:name]
+      ts = stats_of.call(tname)
 
       unless BattleCalculator.hit?(creature[:tec].to_i)
         log << "#{creature[:name]}의 반격 → 빗나감!"
       else
         if BattleCalculator.evade?(ts[:agi].to_i)
-          log << "#{creature[:name]}의 반격 → #{target[:name]} 회피!"
+          log << "#{creature[:name]}의 반격 → #{tname} 회피!"
         else
           crit = BattleCalculator.critical?(creature[:luck].to_i)
           base = crit ? creature[:atk].to_i * 2 : creature[:atk].to_i
-          dmg  = BattleCalculator.calc_damage(base, ts[:dur].to_i)
-          dmg  = dmg / 2 if defended[target[:name]]
+
+          eff_dur = ts[:dur].to_i + dur_bonus[tname]
+          # 그리핀도르 패시브1: 공격자가 정면에 있으면 내구도 1.5배
+          if ts[:house].to_s.strip == '그리핀도르' && ts[:passive] == '1' &&
+             BattleCalculator.in_front?(target[:pos], creature[:pos], ts[:facing].to_s)
+            eff_dur = (eff_dur * 1.5).ceil
+            log << "#{tname}: [그리핀도르] 공격자가 정면에 위치 — 내구도 1.5배"
+          end
+
+          dmg = BattleCalculator.calc_damage(base, eff_dur)
+          dmg = dmg / 2 if defended[tname]
+
+          # 후플푸프 패시브2: 전투 중 1회 건강 0 이하 방지
+          if ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
+             !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
+            dmg = target[:hp].to_i - 1
+            ctx[:guard_used][tname] = true
+            log << "#{tname}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
+          end
+
           target[:hp] = [target[:hp].to_i - dmg, 0].max
-          line = "#{creature[:name]}의 반격 → #{target[:name]}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
-          line += " [방어됨]" if defended[target[:name]]
+          took_damage[tname] = true if dmg > 0
+          line = "#{creature[:name]}의 반격 → #{tname}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
+          line += " [방어됨]" if defended[tname]
           log << line
           if target[:hp] <= 0
             target[:status] = '사망'
-            log << "#{target[:name]} 쓰러짐..."
+            log << "#{tname} 쓰러짐..."
           end
         end
       end
     end
   end
+
+  # 5) 다음 라운드용 패시브 기록 갱신
+  runner_names.each do |name|
+    s = stats_of.call(name)
+    if s[:house].to_s.strip == '슬리데린' && s[:passive] == '2' && battle_actions[name].nil?
+      st = state_of.call(name)
+      if st && st[:hp].to_i > 0
+        ctx[:slytherin_luck][name] += 10
+        log << "#{name}: [슬리데린] 행동을 포기하고 상황을 살핍니다. (다음 라운드부터 행운 +10)"
+      end
+    end
+  end
+
+  ctx[:prev_took_damage] = took_damage
+  battle_actions.each { |name, act| ctx[:prev_action][name] = act[:type] }
 
   view_sheet.update_runner_state(runner_state)
   [log, runner_state]
@@ -353,6 +474,7 @@ loop do
         battle_actions = {}
         processed_messages = {}
         auto_next_round_timer = nil
+        passive_ctx = new_passive_ctx
 
         battle_creature = current_creature(creature_sheet)
         battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
@@ -370,6 +492,7 @@ loop do
         battle_announced = false
         auto_next_round_timer = nil
         battle_creature = nil
+        passive_ctx = nil
 
         broadcast.call("#{runner_tags}\n\n[전투 강제 종료]")
         processed_dm_ids.add(dm_id)
@@ -415,6 +538,7 @@ loop do
         processed_messages = {}
         snapshot_current_dm_ids(processed_dm_ids)
         auto_next_round_timer = nil
+        passive_ctx = new_passive_ctx
 
         battle_creature = current_creature(creature_sheet)
         battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
@@ -430,6 +554,7 @@ loop do
         battle_announced = false
         auto_next_round_timer = nil
         battle_creature = nil
+        passive_ctx = nil
 
         broadcast.call(dm_mode && was_active ? "#{runner_tags}\n\n[전투 강제 종료]" : "[전투 강제 종료]")
         dm_mode = false
@@ -441,6 +566,7 @@ loop do
 
     if battle_active
       battle_creature ||= current_creature(creature_sheet)
+      passive_ctx ||= new_passive_ctx
 
       unless battle_announced
         announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{battle_creature[:name]}와의 전투!\n" \
@@ -451,7 +577,7 @@ loop do
                        "  [공격/크리쳐]\n" \
                        "  [회복/아이디]\n" \
                        "  [방어/아이디]\n" \
-                       "  [이동/좌표]\n\n" \
+                       "  [이동/좌표] (가로/세로/대각선 1칸)\n\n" \
                        "입력 대기: 5분\n" \
                        "───────────────────"
 
@@ -534,7 +660,8 @@ loop do
       round_timeout = (Time.now - battle_start_time) >= ACTION_WAIT_SECONDS
 
       if round_done || round_timeout
-        log, runner_state = settle_round(battle_actions, runner_names, creature_sheet, view_sheet, battle_creature)
+        passive_ctx[:round] = battle_round.to_i
+        log, runner_state = settle_round(battle_actions, runner_names, creature_sheet, view_sheet, battle_creature, passive_ctx)
         view_sheet.update_creature_state(battle_creature) if battle_creature[:hp].to_i > 0
 
         result = build_result_text(
@@ -559,6 +686,7 @@ loop do
         if creature_dead || all_runners_dead
           auto_next_round_timer = nil
           battle_creature = nil
+          passive_ctx = nil
           dm_mode = false
           puts "[전투봇] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
         else
