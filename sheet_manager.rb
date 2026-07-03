@@ -7,6 +7,22 @@ class SheetManager
   MAP_RANGE   = "맵현황!B3:H10"
   STATE_RANGE = "현황!E4:I11"
 
+  # 스탯 탭 헤더 별칭 (1행에서 자동 탐색)
+  STAT_HEADERS = {
+    name:    ['이름', '캐릭터명', '캐릭터'],
+    hp:      ['건강', '체력', 'HP'],
+    dur:     ['내구도'],
+    atk:     ['마법능력', '마법 능력', '공격력'],
+    agi:     ['민첩'],
+    tec:     ['기술'],
+    luck:    ['행운'],
+    skill1:  ['스킬1', '스킬 1'],
+    skill2:  ['스킬2', '스킬 2'],
+    facing:  ['방향', 'facing', 'FACING', 'Facing'],
+    house:   ['기숙사'],
+    passive: ['패시브선택', '패시브 선택', '패시브']
+  }.freeze
+
   def initialize(sheet_id, credentials_path)
     @sheet_id = sheet_id
     @service  = Google::Apis::SheetsV4::SheetsService.new
@@ -31,28 +47,57 @@ class SheetManager
     puts "[Sheet 오류] write #{range}: #{e.message}"
   end
 
-  # 스탯 탭: B=이름 C=건강 D=내구도 E=마법능력 F=민첩 G=기술 H=행운
-  #          I=스킬1 J=스킬2 K=방향 L=기숙사 M=패시브선택(1/2)
-  def read_base_stats
-    rows = read("스탯!B2:M30")
+  # ── 스탯 탭: 1행 헤더 이름으로 열 위치 자동 탐색 ──
+  def stat_column_map
+    return @stat_column_map if @stat_column_map
 
-    rows.map do |r|
-      {
-        name:    r[0].to_s.strip,
-        hp:      r[1].to_i,
-        max_hp:  r[1].to_i,
-        dur:     r[2].to_i,
-        atk:     r[3].to_i,
-        agi:     r[4].to_i,
-        tec:     r[5].to_i,
-        luck:    r[6].to_i,
-        skill1:  r[7].to_s.strip,
-        skill2:  r[8].to_s.strip,
-        facing:  r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip,
-        house:   r[10].to_s.strip,
-        passive: r[11].to_s.strip
-      }
-    end.reject { |r| r[:name].empty? }
+    header = read("스탯!A1:Z1")[0] || []
+    map = {}
+
+    STAT_HEADERS.each do |key, aliases|
+      idx = header.find_index { |h| aliases.include?(h.to_s.strip) }
+      map[key] = idx
+    end
+
+    if map[:name].nil?
+      puts "[Sheet 경고] 스탯 탭에서 '이름' 헤더를 찾지 못했습니다. 기본 열 배치(B=이름)로 동작합니다."
+      map = { name: 1, hp: 2, dur: 3, atk: 4, agi: 5, tec: 6, luck: 7,
+              skill1: 8, skill2: 9, facing: 10, house: 11, passive: 12 }
+    end
+
+    missing = STAT_HEADERS.keys.select { |k| map[k].nil? }
+    puts "[Sheet 안내] 스탯 탭에서 다음 헤더를 찾지 못했습니다(빈값 처리): #{missing.join(', ')}" if missing.any?
+
+    @stat_column_map = map
+  end
+
+  def row_to_stat(row, col)
+    get = ->(key) { col[key] ? row[col[key]] : nil }
+
+    hp = get.call(:hp).to_i
+
+    {
+      name:    get.call(:name).to_s.strip,
+      hp:      hp,
+      max_hp:  hp,
+      dur:     get.call(:dur).to_i,
+      atk:     get.call(:atk).to_i,
+      agi:     get.call(:agi).to_i,
+      tec:     get.call(:tec).to_i,
+      luck:    get.call(:luck).to_i,
+      skill1:  get.call(:skill1).to_s.strip,
+      skill2:  get.call(:skill2).to_s.strip,
+      facing:  get.call(:facing).to_s.strip.empty? ? '하' : get.call(:facing).to_s.strip,
+      house:   get.call(:house).to_s.strip,
+      passive: get.call(:passive).to_s.strip
+    }
+  end
+
+  def read_base_stats
+    col  = stat_column_map
+    rows = read("스탯!A2:Z30")
+
+    rows.map { |r| row_to_stat(r, col) }.reject { |r| r[:name].empty? }
   end
 
   def read_skill_data
@@ -203,174 +248,4 @@ class SheetManager
       status = s[:status].to_s.strip
 
       if pos.match?(/^[A-G][1-8]$/)
-        col = pos[0].ord - 'A'.ord
-        row = pos[1..].to_i - 1
-        grid[row][col] = name
-      end
-
-      table_rows[i] = [
-        name,
-        pos,
-        health_bar(hp, max_hp),
-        max_hp,
-        status
-      ]
-    end
-
-    write(MAP_RANGE, grid)
-    write(STATE_RANGE, table_rows)
-  rescue => e
-    puts "[Sheet 오류] update_runner_state: #{e.message}"
-  end
-
-  def read_creature_config
-    rows = read("보스!A1:K50")
-
-    rows.each do |r|
-      active_idx = r.find_index { |v| v.to_s.strip.upcase == "TRUE" }
-      next if active_idx.nil?
-
-      candidates = []
-
-      ((active_idx + 1)...r.size).each do |i|
-        candidates << r[i].to_s.strip
-      end
-
-      (0...active_idx).reverse_each do |i|
-        candidates << r[i].to_s.strip
-      end
-
-      name = candidates.find do |v|
-        !v.empty? &&
-          v.upcase != "TRUE" &&
-          v.upcase != "FALSE" &&
-          !["이름", "활성화", "버튼", "보스"].include?(v)
-      end
-
-      return { name: name } if name
-    end
-
-    { name: "크리쳐" }
-  end
-
-  def read_creature_stats(creature_name)
-    rows = read("스탯!B2:M30")
-    target = creature_name.to_s.strip
-
-    rows.each do |r|
-      name = r[0].to_s.strip
-      next if name != target
-
-      hp = r[1].to_i
-
-      return {
-        name:   name,
-        hp:     hp,
-        max_hp: hp,
-        dur:    r[2].to_i,
-        atk:    r[3].to_i,
-        agi:    r[4].to_i,
-        tec:    r[5].to_i,
-        luck:   r[6].to_i,
-        skill1: r[7].to_s.strip,
-        skill2: r[8].to_s.strip,
-        facing: r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip,
-        pos:    'D4',
-        status: ''
-      }
-    end
-
-    {
-      name: target.empty? ? "크리쳐" : target,
-      hp: 200,
-      max_hp: 200,
-      pos: "D4",
-      facing: "하",
-      status: ''
-    }
-  end
-
-  def update_creature_state(state)
-    grid = normalize_grid(read(MAP_RANGE), 8, 7)
-
-    name = state[:name].to_s.strip
-    pos  = state[:pos].to_s.strip.upcase
-
-    grid.each_with_index do |row, row_idx|
-      row.each_with_index do |cell, col_idx|
-        grid[row_idx][col_idx] = '' if cell.to_s.strip == name
-      end
-    end
-
-    if pos.match?(/^[A-G][1-8]$/)
-      col = pos[0].ord - 'A'.ord
-      row = pos[1..].to_i - 1
-      grid[row][col] = name
-    end
-
-    write(MAP_RANGE, grid)
-  rescue => e
-    puts "[Sheet 오류] update_creature_state: #{e.message}"
-  end
-
-  def update_view_map(all_states)
-    grid = Array.new(8) { Array.new(7, '') }
-
-    all_states.each do |s|
-      name = s[:name].to_s.strip
-      pos  = s[:pos].to_s.strip.upcase
-      next if name.empty?
-      next unless pos.match?(/^[A-G][1-8]$/)
-
-      col = pos[0].ord - 'A'.ord
-      row = pos[1..].to_i - 1
-      grid[row][col] = name
-    end
-
-    write(MAP_RANGE, grid)
-  end
-
-  def update_view_team(states, team_name = nil)
-    update_runner_state(states)
-  end
-
-  def update_view_creature(state)
-    update_creature_state(state)
-  end
-
-  def clear_round_status
-    states = read_runner_state
-    states.each { |s| s[:status] = '' }
-    update_runner_state(states)
-  end
-
-  def health_bar(current, max)
-    current = current.to_i
-    max = max.to_i
-
-    return "0/0" if max <= 0
-
-    ratio  = current.to_f / max.to_f
-    filled = (ratio * 10).round
-    filled = [[filled, 10].min, 0].max
-    bar = ("█" * filled) + ("░" * (10 - filled))
-
-    "#{bar}  #{current}/#{max}"
-  end
-
-  def extract_hp_current(value)
-    text = value.to_s
-    match = text.match(/(\d+)\s*\/\s*(\d+)/)
-    return match[1].to_i if match
-
-    text.to_i
-  end
-
-  def normalize_grid(grid, rows, cols)
-    Array.new(rows) do |r|
-      Array.new(cols) do |c|
-        grid.dig(r, c).to_s
-      end
-    end
-  end
-end
+        col
