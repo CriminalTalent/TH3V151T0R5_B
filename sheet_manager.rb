@@ -31,8 +31,10 @@ class SheetManager
     puts "[Sheet 오류] write #{range}: #{e.message}"
   end
 
+  # 스탯 탭: B=이름 C=건강 D=내구도 E=마법능력 F=민첩 G=기술 H=행운
+  #          I=스킬1 J=스킬2 K=방향 L=기숙사 M=패시브선택(1/2)
   def read_base_stats
-    rows = read("스탯!B2:K30")
+    rows = read("스탯!B2:M30")
 
     rows.map do |r|
       {
@@ -46,7 +48,9 @@ class SheetManager
         luck:    r[6].to_i,
         skill1:  r[7].to_s.strip,
         skill2:  r[8].to_s.strip,
-        facing:  r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip
+        facing:  r[9].to_s.strip.empty? ? '하' : r[9].to_s.strip,
+        house:   r[10].to_s.strip,
+        passive: r[11].to_s.strip
       }
     end.reject { |r| r[:name].empty? }
   end
@@ -250,7 +254,7 @@ class SheetManager
   end
 
   def read_creature_stats(creature_name)
-    rows = read("스탯!B2:K30")
+    rows = read("스탯!B2:M30")
     target = creature_name.to_s.strip
 
     rows.each do |r|
