@@ -248,4 +248,166 @@ class SheetManager
       status = s[:status].to_s.strip
 
       if pos.match?(/^[A-G][1-8]$/)
-        col
+        col = pos[0].ord - 'A'.ord
+        row = pos[1..].to_i - 1
+        grid[row][col] = name
+      end
+
+      table_rows[i] = [
+        name,
+        pos,
+        health_bar(hp, max_hp),
+        max_hp,
+        status
+      ]
+    end
+
+    write(MAP_RANGE, grid)
+    write(STATE_RANGE, table_rows)
+  rescue => e
+    puts "[Sheet 오류] update_runner_state: #{e.message}"
+  end
+
+  def read_creature_config
+    rows = read("보스!A1:K50")
+
+    rows.each do |r|
+      active_idx = r.find_index { |v| v.to_s.strip.upcase == "TRUE" }
+      next if active_idx.nil?
+
+      candidates = []
+
+      ((active_idx + 1)...r.size).each do |i|
+        candidates << r[i].to_s.strip
+      end
+
+      (0...active_idx).reverse_each do |i|
+        candidates << r[i].to_s.strip
+      end
+
+      name = candidates.find do |v|
+        !v.empty? &&
+          v.upcase != "TRUE" &&
+          v.upcase != "FALSE" &&
+          !["이름", "활성화", "버튼", "보스"].include?(v)
+      end
+
+      return { name: name } if name
+    end
+
+    { name: "크리쳐" }
+  end
+
+  def read_creature_stats(creature_name)
+    col    = stat_column_map
+    rows   = read("스탯!A2:Z30")
+    target = creature_name.to_s.strip
+
+    rows.each do |r|
+      stat = row_to_stat(r, col)
+      next if stat[:name] != target
+
+      return stat.merge(pos: 'D4', status: '')
+    end
+
+    {
+      name: target.empty? ? "크리쳐" : target,
+      hp: 200,
+      max_hp: 200,
+      dur: 0,
+      atk: 0,
+      agi: 0,
+      tec: 0,
+      luck: 0,
+      pos: "D4",
+      facing: "하",
+      house: '',
+      passive: '',
+      status: ''
+    }
+  end
+
+  def update_creature_state(state)
+    grid = normalize_grid(read(MAP_RANGE), 8, 7)
+
+    name = state[:name].to_s.strip
+    pos  = state[:pos].to_s.strip.upcase
+
+    grid.each_with_index do |row, row_idx|
+      row.each_with_index do |cell, col_idx|
+        grid[row_idx][col_idx] = '' if cell.to_s.strip == name
+      end
+    end
+
+    if pos.match?(/^[A-G][1-8]$/)
+      col = pos[0].ord - 'A'.ord
+      row = pos[1..].to_i - 1
+      grid[row][col] = name
+    end
+
+    write(MAP_RANGE, grid)
+  rescue => e
+    puts "[Sheet 오류] update_creature_state: #{e.message}"
+  end
+
+  def update_view_map(all_states)
+    grid = Array.new(8) { Array.new(7, '') }
+
+    all_states.each do |s|
+      name = s[:name].to_s.strip
+      pos  = s[:pos].to_s.strip.upcase
+      next if name.empty?
+      next unless pos.match?(/^[A-G][1-8]$/)
+
+      col = pos[0].ord - 'A'.ord
+      row = pos[1..].to_i - 1
+      grid[row][col] = name
+    end
+
+    write(MAP_RANGE, grid)
+  end
+
+  def update_view_team(states, team_name = nil)
+    update_runner_state(states)
+  end
+
+  def update_view_creature(state)
+    update_creature_state(state)
+  end
+
+  def clear_round_status
+    states = read_runner_state
+    states.each { |s| s[:status] = '' }
+    update_runner_state(states)
+  end
+
+  def health_bar(current, max)
+    current = current.to_i
+    max = max.to_i
+
+    return "0/0" if max <= 0
+
+    ratio  = current.to_f / max.to_f
+    filled = (ratio * 10).round
+    filled = [[filled, 10].min, 0].max
+    bar = ("█" * filled) + ("░" * (10 - filled))
+
+    "#{bar}  #{current}/#{max}"
+  end
+
+  def extract_hp_current(value)
+    text = value.to_s
+    match = text.match(/(\d+)\s*\/\s*(\d+)/)
+    return match[1].to_i if match
+
+    text.to_i
+  end
+
+  def normalize_grid(grid, rows, cols)
+    Array.new(rows) do |r|
+      Array.new(cols) do |c|
+        grid.dig(r, c).to_s
+      end
+    end
+  end
+end
