@@ -187,6 +187,120 @@ def adjacent_move?(from, to)
   dx <= 1 && dy <= 1 && (dx + dy) > 0
 end
 
+def valid_coord?(coord)
+  coord.to_s.strip.upcase.match?(/^[A-G][1-8]$/)
+end
+
+def normalize_coord(raw)
+  coord = LOCATION_MAP[raw.to_s.strip] || raw
+  coord.to_s.strip.upcase
+end
+
+
+
+def header_index(headers, aliases)
+  headers.each_with_index do |h, idx|
+    normalized = h.to_s.strip.gsub(/\s+/, '')
+    return idx if aliases.any? { |a| normalized == a.gsub(/\s+/, '') }
+  end
+  nil
+end
+
+def read_place_rows(sheet)
+  rows = sheet.read('장소!A1:Z500')
+  return [[], []] if rows.empty?
+
+  headers = rows.first.to_a.map(&:to_s)
+  body = rows[1..] || []
+  [headers, body]
+rescue => e
+  puts "[장소 탭 읽기 오류] #{e.class}: #{e.message}"
+  [[], []]
+end
+
+def find_place_row(sheet, coord)
+  coord = normalize_coord(coord)
+  headers, body = read_place_rows(sheet)
+  return nil if headers.empty?
+
+  coord_idx = header_index(headers, ['좌표', '위치', '장소', '칸', '맵좌표']) || 0
+
+  body.find do |row|
+    normalize_coord(row[coord_idx]) == coord
+  end&.then { |row| [headers, row] }
+end
+
+def cell_by_alias(headers, row, aliases)
+  idx = header_index(headers, aliases)
+  return '' unless idx
+  row[idx].to_s.strip
+end
+
+def build_place_text(sheet, coord)
+  found = find_place_row(sheet, coord)
+  return nil unless found
+
+  headers, row = found
+
+  title = cell_by_alias(headers, row, ['장소명', '장소 이름', '이름', '명칭'])
+  action = cell_by_alias(headers, row, ['행동', '행동지문', '이동지문', '이동 출력', '이동출력'])
+  description = cell_by_alias(headers, row, ['지문', '설명', '본문', '장소지문', '출력'])
+  choices = cell_by_alias(headers, row, ['선택지', '선택', '오브젝트', '조사대상'])
+
+  lines = []
+  lines << "[이동/#{coord}]"
+  lines << title unless title.empty?
+  lines << action unless action.empty?
+  lines << description unless description.empty? || description == action
+  lines << "선택지: #{choices}" unless choices.empty?
+
+  lines.join("\n")
+end
+
+def find_object_row(sheet, coord, object_name)
+  coord = normalize_coord(coord)
+  object_name = object_name.to_s.strip
+
+  headers, body = read_place_rows(sheet)
+  return nil if headers.empty? || object_name.empty?
+
+  coord_idx = header_index(headers, ['좌표', '위치', '장소', '칸', '맵좌표']) || 0
+  object_idx = header_index(headers, ['오브젝트명', '오브젝트', '대상', '아이템명', '아이템', '조사대상'])
+
+  return nil unless object_idx
+
+  body.find do |row|
+    normalize_coord(row[coord_idx]) == coord && row[object_idx].to_s.strip == object_name
+  end&.then { |row| [headers, row] }
+end
+
+def build_investigate_text(sheet, coord, object_name)
+  found = find_object_row(sheet, coord, object_name)
+  return "[조사/#{object_name}]\n해당 위치에서 조사 대상을 찾지 못했습니다." unless found
+
+  headers, row = found
+  text = cell_by_alias(headers, row, ['조사', '조사지문', '조사출력', '조사결과', '지문', '설명'])
+  text = '조사할 수 있는 내용이 비어 있습니다.' if text.empty?
+  "[조사/#{object_name}]\n#{text}"
+end
+
+def build_acquire_text(sheet, coord, object_name)
+  found = find_object_row(sheet, coord, object_name)
+  return "[획득/#{object_name}]\n해당 위치에서 획득 대상을 찾지 못했습니다." unless found
+
+  headers, row = found
+  text = cell_by_alias(headers, row, ['획득', '획득지문', '획득출력', '획득결과'])
+  text = cell_by_alias(headers, row, ['조사', '조사지문', '조사출력', '조사결과']) if text.empty?
+  text = '획득 처리할 내용이 비어 있습니다.' if text.empty?
+  "[획득/#{object_name}]\n#{text}"
+end
+
+def current_runner_coord(view_sheet, username)
+  runner_state = view_sheet.read_runner_state
+  runner = runner_state.find { |r| r[:name] == username }
+  runner&.dig(:pos).to_s.strip
+end
+
 def validate_action(username, action_type, action_target, runner_names, view_sheet, creature)
   runner_state = view_sheet.read_runner_state
   actor = runner_state.find { |r| r[:name] == username }
@@ -212,8 +326,7 @@ def validate_action(username, action_type, action_target, runner_names, view_she
     return [false, "대상을 찾을 수 없습니다. 참여자 아이디를 확인해주세요."] unless target_runner
 
   when '이동'
-    coord = LOCATION_MAP[action_target] || action_target
-    coord = coord.to_s.strip.upcase
+    coord = normalize_coord(action_target)
 
     unless coord.match?(/^[A-G][1-8]$/)
       return [false, "이동 좌표가 올바르지 않습니다. A1~G8 범위로 입력해주세요."]
@@ -237,7 +350,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     return
   end
 
-  match = text.match(/\[(공격|회복|방어|이동)\/(.+?)\]/)
+  match = text.match(/\[(공격|회복|방어|이동|위치)\/(.+?)\]/)
 
   unless match
     listener.send_dm(username, "형식이 올바르지 않습니다. [공격/크리쳐], [회복/아이디], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.")
@@ -247,6 +360,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
 
   action_type = match[1]
   action_target = match[2].strip
+  action_type = '이동' if action_type == '위치'
 
   valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, battle_creature)
 
@@ -257,8 +371,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   end
 
   if action_type == '이동'
-    coord = LOCATION_MAP[action_target] || action_target
-    coord = coord.to_s.strip.upcase
+    coord = normalize_coord(action_target)
 
     runner_state = view_sheet.read_runner_state
     runner = runner_state.find { |r| r[:name] == username }
@@ -536,7 +649,86 @@ loop do
 
       content = clean_html(last_status['content'])
 
-      if content.include?('[전투시작]') && !battle_active
+      if (location_match = content.match(/\[이동\/(.+?)\]/)) && !battle_active
+        username = sender['username'].to_s.strip
+        coord = normalize_coord(location_match[1])
+
+        unless valid_coord?(coord)
+          listener.send_dm(username, "이동 좌표가 올바르지 않습니다. A1~G8 범위로 입력해주세요.")
+          processed_dm_ids.add(dm_id)
+          next
+        end
+
+        runner_state = view_sheet.read_runner_state
+        runner = runner_state.find { |r| r[:name] == username }
+
+        unless runner
+          listener.send_dm(username, "현황 탭에서 #{username}을(를) 찾지 못했습니다. 이름/ID를 확인해주세요.")
+          processed_dm_ids.add(dm_id)
+          next
+        end
+
+        runner[:pos] = coord
+        view_sheet.update_runner_state(runner_state)
+
+        detected_creature = current_creature(creature_sheet)
+        creature_pos = detected_creature[:pos].to_s.strip.upcase
+
+        processed_dm_ids.add(dm_id)
+
+        if creature_pos == coord
+          runner_names = [username]
+          runner_tags = "@#{username}"
+          total_runners = 1
+
+          dm_mode = true
+          battle_active = true
+          battle_announced = false
+          battle_start_time = Time.now
+          battle_round = "1"
+          battle_actions = {}
+          processed_messages = {}
+          auto_next_round_timer = nil
+          passive_ctx = new_passive_ctx
+
+          battle_creature = detected_creature
+          battle_creature[:pos] = coord
+          view_sheet.update_creature_state(battle_creature)
+
+          snapshot_current_dm_ids(processed_dm_ids)
+          snapshot_current_notification_ids(processed_notification_ids)
+
+          listener.send_dm(username, "[이동/#{coord}] 확인. 해당 위치에서 #{battle_creature[:name]}을(를) 조우했습니다. 전투를 시작합니다.")
+          puts "[전투봇] #{username} 이동 → #{coord}, #{battle_creature[:name]} 조우로 전투 시작"
+        else
+          place_text = build_place_text(runner_sheet, coord)
+          listener.send_dm(username, place_text || "[이동/#{coord}] 확인. 현재 위치를 갱신했습니다.")
+          puts "[전투봇] #{username} 이동 → #{coord}"
+        end
+
+      elsif (investigate_match = content.match(/\[조사\/(.+?)\]/)) && !battle_active
+        username = sender['username'].to_s.strip
+        object_name = investigate_match[1].to_s.strip
+        coord = current_runner_coord(view_sheet, username)
+        listener.send_dm(username, build_investigate_text(runner_sheet, coord, object_name))
+        processed_dm_ids.add(dm_id)
+        puts "[전투봇] #{username} 조사 → #{object_name} @#{coord}"
+
+      elsif (acquire_match = content.match(/\[획득\/(.+?)\]/)) && !battle_active
+        username = sender['username'].to_s.strip
+        object_name = acquire_match[1].to_s.strip
+        coord = current_runner_coord(view_sheet, username)
+        listener.send_dm(username, build_acquire_text(runner_sheet, coord, object_name))
+        processed_dm_ids.add(dm_id)
+        puts "[전투봇] #{username} 획득 → #{object_name} @#{coord}"
+
+      elsif content.include?('[조사종료]') && !battle_active
+        username = sender['username'].to_s.strip
+        listener.send_dm(username, "[조사종료] 조사 완료 처리되었습니다.")
+        processed_dm_ids.add(dm_id)
+        puts "[전투봇] #{username} 조사종료"
+
+      elsif content.include?('[전투시작]') && !battle_active
         usernames = extract_usernames_from_status(last_status, content, BOT_USERNAME)
         usernames = (usernames - [sender['username']]).uniq
         usernames = [sender['username']] if usernames.empty?
