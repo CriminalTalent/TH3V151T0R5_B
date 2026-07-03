@@ -12,6 +12,7 @@ Dotenv.load(File.join(__dir__, '.env'))
 
 require_relative 'sheet_manager'
 require_relative 'mastodon_listener'
+require_relative 'battle_calculator'
 
 RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
 CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
@@ -50,6 +51,7 @@ total_runners = 0
 runner_names = []
 runner_tags = ""
 auto_next_round_timer = nil
+battle_creature = nil
 
 def clean_html(text)
   text.to_s.gsub(/<[^>]*>/, '').strip
@@ -164,10 +166,102 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   [true, nil]
 end
 
-def build_result_text(runner_tags, battle_round, creature, battle_actions, runner_names, elapsed, timeout: false)
-  creature_name = creature[:name] || '크리쳐'
-  creature_hp = creature[:hp] || 200
-  creature_max_hp = creature[:max_hp] || creature_hp
+# ── 라운드 정산: 회복 → 방어 → 공격 → 크리쳐 반격 ──
+def settle_round(battle_actions, runner_names, creature_sheet, view_sheet, creature)
+  runner_state = view_sheet.read_runner_state
+  base_stats   = creature_sheet.read_base_stats
+  stats_of = ->(name) { base_stats.find { |s| s[:name] == name } || {} }
+  state_of = ->(name) { runner_state.find { |r| r[:name] == name } }
+
+  defended = {}
+  log = []
+
+  # 1) 회복
+  battle_actions.each do |name, act|
+    next unless act[:type] == '회복'
+    target_name = normalize_target(act[:target])
+    target = state_of.call(target_name)
+    next unless target
+    if target[:hp].to_i <= 0
+      log << "#{name} → #{target_name} 회복 실패 (이미 쓰러짐)"
+      next
+    end
+    heal = [stats_of.call(name)[:atk].to_i, 1].max
+    before = target[:hp].to_i
+    target[:hp] = [before + heal, target[:max_hp].to_i].min
+    log << "#{name} → #{target_name} 회복 +#{target[:hp] - before}"
+  end
+
+  # 2) 방어
+  battle_actions.each do |name, act|
+    next unless act[:type] == '방어'
+    target_name = normalize_target(act[:target])
+    defended[target_name] = true
+    log << "#{name} → #{target_name} 방어 (받는 피해 절반)"
+  end
+
+  # 3) 공격
+  battle_actions.each do |name, act|
+    next unless act[:type] == '공격'
+    next if creature[:hp].to_i <= 0
+    actor = state_of.call(name)
+    next unless actor && actor[:hp].to_i > 0
+    s = stats_of.call(name)
+
+    unless BattleCalculator.hit?(s[:tec].to_i)
+      log << "#{name}의 공격 → 빗나감!"
+      next
+    end
+    if BattleCalculator.evade?(creature[:agi].to_i)
+      log << "#{name}의 공격 → #{creature[:name]} 회피!"
+      next
+    end
+
+    crit = BattleCalculator.critical?(s[:luck].to_i)
+    base = crit ? s[:atk].to_i * 2 : s[:atk].to_i
+    dmg  = BattleCalculator.calc_damage(base, creature[:dur].to_i)
+    creature[:hp] = [creature[:hp].to_i - dmg, 0].max
+    log << "#{name}의 공격 → #{creature[:name]}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
+  end
+
+  # 4) 크리쳐 반격
+  if creature[:hp].to_i > 0
+    living = runner_state.select { |r| r[:hp].to_i > 0 && runner_names.include?(r[:name]) }
+    if living.any?
+      target = living.sample
+      ts = stats_of.call(target[:name])
+
+      unless BattleCalculator.hit?(creature[:tec].to_i)
+        log << "#{creature[:name]}의 반격 → 빗나감!"
+      else
+        if BattleCalculator.evade?(ts[:agi].to_i)
+          log << "#{creature[:name]}의 반격 → #{target[:name]} 회피!"
+        else
+          crit = BattleCalculator.critical?(creature[:luck].to_i)
+          base = crit ? creature[:atk].to_i * 2 : creature[:atk].to_i
+          dmg  = BattleCalculator.calc_damage(base, ts[:dur].to_i)
+          dmg  = dmg / 2 if defended[target[:name]]
+          target[:hp] = [target[:hp].to_i - dmg, 0].max
+          line = "#{creature[:name]}의 반격 → #{target[:name]}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
+          line += " [방어됨]" if defended[target[:name]]
+          log << line
+          if target[:hp] <= 0
+            target[:status] = '사망'
+            log << "#{target[:name]} 쓰러짐..."
+          end
+        end
+      end
+    end
+  end
+
+  view_sheet.update_runner_state(runner_state)
+  [log, runner_state]
+end
+
+def build_result_text(runner_tags, battle_round, creature, battle_actions, runner_names, log, runner_state, view_sheet, timeout: false)
+  creature_name   = creature[:name] || '크리쳐'
+  creature_hp     = creature[:hp].to_i
+  creature_max_hp = (creature[:max_hp] || creature_hp).to_i
 
   title = timeout ? "[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)" : "[#{battle_round}라운드] #{creature_name} 전투 결과"
 
@@ -184,11 +278,29 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   end
 
   result += "───────────────────\n"
-  result += "#{creature_name} 상태: 건강 #{creature_hp}/#{creature_max_hp}\n\n"
-  result += timeout ? "전투 정산 완료! (5분)" : "전투 정산 완료! (#{elapsed}초)"
+  log.each { |l| result += "#{l}\n" }
+  result += "───────────────────\n"
+
+  runner_state.select { |r| runner_names.include?(r[:name]) }.each do |r|
+    result += "#{r[:name]}: #{view_sheet.health_bar(r[:hp], r[:max_hp])}\n"
+  end
+  result += "#{creature_name}: #{view_sheet.health_bar(creature_hp, creature_max_hp)}\n\n"
+
+  if creature_hp <= 0
+    result += "#{creature_name} 격파! 전투 승리!"
+  elsif runner_state.none? { |r| runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
+    result += "전원 전투 불능... 전투 패배..."
+  else
+    result += "#{ROUND_WAIT_SECONDS}초 후 다음 라운드가 시작됩니다."
+  end
 
   result
 end
+
+# ── 재시작 시 과거 툿 재처리 방지: 현재 타임라인/DM을 처리 완료로 스냅샷 ──
+fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
+snapshot_current_dm_ids(processed_dm_ids)
+puts "[전투봇] 기존 툿 #{processed_statuses.size}건 스냅샷 완료 (재발동 방지)"
 
 loop do
   begin
@@ -241,8 +353,11 @@ loop do
         snapshot_current_dm_ids(processed_dm_ids)
         auto_next_round_timer = nil
 
-        creature = current_creature(creature_sheet)
-        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{creature[:name]}"
+        battle_creature = current_creature(creature_sheet)
+        battle_creature[:pos] = 'D4' if battle_creature[:pos].to_s.strip.empty?
+        view_sheet.update_creature_state(battle_creature)
+
+        puts "[전투봇] #{battle_round}라운드 시작 - 참여자 #{total_runners}명 (#{runner_names.join(', ')}), 상대: #{battle_creature[:name]}"
 
       elsif content.include?('[전투종료]')
         battle_active = false
@@ -250,6 +365,7 @@ loop do
         processed_messages = {}
         battle_announced = false
         auto_next_round_timer = nil
+        battle_creature = nil
 
         listener.post_public("[전투 강제 종료]")
         puts "[전투봇] 전투 종료"
@@ -259,10 +375,11 @@ loop do
     end
 
     if battle_active
-      unless battle_announced
-        creature = current_creature(creature_sheet)
+      battle_creature ||= current_creature(creature_sheet)
 
-        announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{creature[:name]}와의 전투!\n\n" \
+      unless battle_announced
+        announcement = "#{runner_tags}\n\n[#{battle_round}라운드] #{battle_creature[:name]}와의 전투!\n" \
+                       "#{battle_creature[:name]} 상태: #{view_sheet.health_bar(battle_creature[:hp], battle_creature[:max_hp])}\n\n" \
                        "───────────────────\n" \
                        "DM으로 행동을 입력해주세요.\n\n" \
                        "형식:\n" \
@@ -309,9 +426,8 @@ loop do
 
         action_type = match[1]
         action_target = match[2].strip
-        creature = current_creature(creature_sheet)
 
-        valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, creature)
+        valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, battle_creature)
 
         unless valid
           listener.send_dm(username, error_message)
@@ -329,6 +445,7 @@ loop do
           if runner
             runner[:pos] = coord
             view_sheet.update_runner_state(runner_state)
+            view_sheet.update_creature_state(battle_creature)
             puts "[전투봇] #{username} 이동 → #{coord}"
           end
         end
@@ -344,48 +461,42 @@ loop do
         puts "[전투봇] #{username} → [#{action_type}/#{action_target}]"
 
         listener.send_dm(username, "확인, 대기해주세요.")
-
-        if battle_actions.size >= total_runners
-          creature = current_creature(creature_sheet)
-
-          result = build_result_text(
-            runner_tags,
-            battle_round,
-            creature,
-            battle_actions,
-            runner_names,
-            (Time.now - battle_start_time).to_i,
-            timeout: false
-          )
-
-          listener.post_public(result)
-
-          battle_active = false
-          auto_next_round_timer = Time.now
-
-          puts "[전투봇] 모든 러너 입력 완료 - #{ROUND_WAIT_SECONDS}초 후 다음라운드"
-        end
       end
 
-      if battle_active && (Time.now - battle_start_time) >= ACTION_WAIT_SECONDS
-        creature = current_creature(creature_sheet)
+      round_done = battle_actions.size >= total_runners && total_runners > 0
+      round_timeout = (Time.now - battle_start_time) >= ACTION_WAIT_SECONDS
+
+      if round_done || round_timeout
+        log, runner_state = settle_round(battle_actions, runner_names, creature_sheet, view_sheet, battle_creature)
+        view_sheet.update_creature_state(battle_creature) if battle_creature[:hp].to_i > 0
 
         result = build_result_text(
           runner_tags,
           battle_round,
-          creature,
+          battle_creature,
           battle_actions,
           runner_names,
-          ACTION_WAIT_SECONDS,
-          timeout: true
+          log,
+          runner_state,
+          view_sheet,
+          timeout: round_timeout && !round_done
         )
 
         listener.post_public(result)
 
         battle_active = false
-        auto_next_round_timer = Time.now
 
-        puts "[전투봇] #{battle_round}라운드 5분 경과 - #{ROUND_WAIT_SECONDS}초 후 다음라운드"
+        creature_dead = battle_creature[:hp].to_i <= 0
+        all_runners_dead = runner_state.none? { |r| runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
+
+        if creature_dead || all_runners_dead
+          auto_next_round_timer = nil
+          battle_creature = nil
+          puts "[전투봇] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
+        else
+          auto_next_round_timer = Time.now
+          puts "[전투봇] #{battle_round}라운드 정산 완료 - #{ROUND_WAIT_SECONDS}초 후 다음라운드"
+        end
       end
     end
 
