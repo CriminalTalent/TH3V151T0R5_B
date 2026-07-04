@@ -18,6 +18,7 @@ require_relative 'battle_api'
 require_relative 'battle_state'
 require_relative 'battle_grid'
 require_relative 'battle_skills'
+require_relative 'battle_boss_patterns'
 require_relative 'battle_round'
 require_relative 'battle_session'
 
@@ -48,6 +49,7 @@ puts '[전투봇] 초기화 완료 - 다중 전투 세션 모드'
 processed_statuses = Set.new
 processed_dm_ids = Set.new
 processed_notification_ids = Set.new
+processed_action_status_ids = Set.new
 sessions = {}
 
 # ──────────────────────────────────────────────
@@ -133,7 +135,13 @@ def find_session_for_action(sessions, username, status = nil)
   active.max_by { |s| s.start_time }
 end
 
-def process_action_for_session(session, username, text, processed_set, processed_id, runner_sheet, view_sheet, listener)
+def process_action_for_session(session, username, text, processed_set, processed_id, runner_sheet, view_sheet, listener, processed_action_status_ids = nil, status_id = nil)
+  status_id ||= processed_id
+  if processed_action_status_ids && processed_action_status_ids.include?(status_id.to_s)
+    processed_set.add(processed_id)
+    return false
+  end
+
   before = session.actions.size
 
   record_battle_action(
@@ -150,7 +158,9 @@ def process_action_for_session(session, username, text, processed_set, processed
     listener
   )
 
-  session.actions.size > before
+  changed = session.actions.size > before
+  processed_action_status_ids.add(status_id.to_s) if processed_action_status_ids && changed
+  changed
 end
 
 def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet)
@@ -264,7 +274,7 @@ loop do
         next
       end
 
-      process_action_for_session(session, username, content, processed_dm_ids, dm_id, runner_sheet, view_sheet, listener)
+      process_action_for_session(session, username, content, processed_dm_ids, dm_id, runner_sheet, view_sheet, listener, processed_action_status_ids, dm_id)
     end
 
     # 공개 타임라인에서 전투 시작/종료 처리
@@ -337,7 +347,7 @@ loop do
         next
       end
 
-      process_action_for_session(session, username, text, processed_notification_ids, notification_id, runner_sheet, view_sheet, listener)
+      process_action_for_session(session, username, text, processed_notification_ids, notification_id, runner_sheet, view_sheet, listener, processed_action_status_ids, status['id'])
     end
 
     # 정산
