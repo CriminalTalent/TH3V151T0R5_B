@@ -83,6 +83,20 @@ def post_session_thread(session, text)
   response
 end
 
+def battle_start_text?(text)
+  text.to_s.include?('[전투시작]') || text.to_s.match?(/\[전투시작\//)
+end
+
+def battle_end_text?(text)
+  text = text.to_s
+  text.include?('[전투종료]') ||
+    text.include?('[전투중단]') ||
+    text.include?('[전투강제종료]') ||
+    text.include?('[전투취소]') ||
+    text.include?('[전투 종료]') ||
+    text.include?('[전투 중단]')
+end
+
 def announce_round(session, view_sheet)
   announcement = "#{session.runner_tags}\n\n[#{session.round}라운드] #{session.creature[:name]}와의 전투!\n" \
                  "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
@@ -213,7 +227,7 @@ loop do
       username = sender['username'].to_s.gsub('@', '').strip
       content = clean_html(last_status['content'])
 
-      if content.include?('[전투시작]')
+      if battle_start_text?(content)
         session = create_battle_session_from_status(last_status, content, :dm, creature_sheet, BOT_USERNAME, username)
         if session
           sessions[session.id] = session
@@ -223,13 +237,13 @@ loop do
         next
       end
 
-      if content.include?('[전투종료]')
+      if battle_end_text?(content)
         target = find_session_for_action(sessions, username, last_status)
         target ||= sessions.values.select(&:active).max_by(&:start_time)
         if target
           target.active = false
           target.auto_next_round_timer = nil
-          post_session_thread(target, "#{target.runner_tags}\n\n[전투 강제 종료]")
+          post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]")
           puts "[전투봇] DM 세션 종료 #{target.id}"
         end
         processed_dm_ids.add(dm_id)
@@ -257,7 +271,7 @@ loop do
 
       content = clean_html(status['content'])
 
-      if content.include?('[전투시작]')
+      if battle_start_text?(content)
         session = create_battle_session_from_status(status, content, :public, creature_sheet, BOT_USERNAME, nil)
         if session
           sessions[session.id] = session
@@ -270,13 +284,13 @@ loop do
         next
       end
 
-      if content.include?('[전투종료]')
+      if battle_end_text?(content)
         target = sessions.values.select(&:active).find { |s| s.related_to_status?(status) }
         target ||= sessions.values.select(&:active).max_by(&:start_time)
         if target
           target.active = false
           target.auto_next_round_timer = nil
-          post_session_thread(target, '[전투 강제 종료]')
+          post_session_thread(target, '[전투 중단]')
           puts "[전투봇] 공개 세션 종료 #{target.id}"
         end
       end
@@ -308,7 +322,7 @@ loop do
       username = notification.dig('account', 'username').to_s.gsub('@', '').strip
       text = clean_html(status['content'])
 
-      if text.include?('[전투시작]') || text.include?('[전투종료]')
+      if battle_start_text?(text) || battle_end_text?(text)
         processed_notification_ids.add(notification_id)
         next
       end
