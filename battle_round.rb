@@ -333,12 +333,24 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   end
 
   # 4) 보스 패턴/디버프
+  boss_skill_used = false
   if creature[:hp].to_i > 0
-    BattleBossPatterns.apply_pattern!(log, runner_state, creature, ctx)
+    boss_skill_used = BattleBossPatterns.apply_pattern!(
+      log,
+      runner_state,
+      creature,
+      ctx,
+      stats_of: stats_of,
+      dur_bonus: dur_bonus,
+      defended_multiplier: defended_multiplier,
+      shields: shields,
+      took_damage: took_damage
+    )
   end
 
   # 5) 크리쳐 반격
-  if creature[:hp].to_i > 0
+  # 현재스킬/이번턴스킬이 지정된 턴에는 그 스킬이 보스 행동이므로 기본 반격은 생략합니다.
+  if creature[:hp].to_i > 0 && !boss_skill_used
     if ctx[:confusion][creature[:name]] >= 5
       log << "#{creature[:name]}은(는) 혼란 5중첩으로 행동할 수 없습니다."
       ctx[:confusion][creature[:name]] = 0
