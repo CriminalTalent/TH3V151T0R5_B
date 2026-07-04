@@ -5,11 +5,20 @@ module BattleBossPatterns
   module_function
 
   def pattern_name(creature)
-    creature[:pattern].to_s.strip
+    creature[:current_skill].to_s.strip.empty? ? creature[:pattern].to_s.strip : creature[:current_skill].to_s.strip
   end
 
   def pattern_cells(creature)
-    BattleGrid.parse_cell_list(creature[:pattern_cells] || creature[:패턴범위] || creature[:범위])
+    # 스킬범위/패턴범위는 실제 스킬 판정에만 사용하고, 전장에는 표시하지 않습니다.
+    BattleGrid.parse_cell_list(
+      creature[:skill_range].to_s.empty? ?
+        (creature[:pattern_cells] || creature[:패턴범위] || creature[:범위]) :
+        creature[:skill_range]
+    )
+  end
+
+  def skill_target(creature)
+    creature[:skill_target].to_s.strip
   end
 
   def debuff_name(creature)
@@ -91,10 +100,12 @@ module BattleBossPatterns
     debuff = debuff_name(creature)
     multiplier = pattern_multiplier(creature)
 
+    log << "#{creature[:name]}의 이번 턴 스킬: #{name}"
+
     case name
     when '범위공격'
       return if cells.empty?
-      log << "#{creature[:name]}의 범위공격 — 대상 칸 #{cells.join(', ')}"
+      log << "#{creature[:name]}의 범위공격"
       runner_state.each do |runner|
         next unless runner[:hp].to_i > 0
         next unless cells.include?(runner[:pos].to_s.upcase)
@@ -115,7 +126,7 @@ module BattleBossPatterns
       end
     when '디버프'
       return if cells.empty?
-      log << "#{creature[:name]}의 디버프 패턴 — 대상 칸 #{cells.join(', ')}"
+      log << "#{creature[:name]}의 디버프"
       runner_state.each do |runner|
         next unless runner[:hp].to_i > 0
         next unless cells.include?(runner[:pos].to_s.upcase)
