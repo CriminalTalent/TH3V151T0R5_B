@@ -15,6 +15,17 @@ def parse_creature_stats_row(row)
   hp = row[4].to_i
   hp = 200 if hp <= 0
 
+  # N 현재스킬/이번턴스킬, O 스킬대상, P 스킬범위, Q 디버프, R 점유칸, S 배율
+  current_skill = row[13].to_s.strip
+  skill_target  = row[14].to_s.strip
+  skill_range   = row[15].to_s.strip
+  debuff        = row[16].to_s.strip
+  custom_cells  = row[17].to_s.strip
+  multiplier    = row[18].to_s.strip
+
+  # 구버전 호환: O열에 좌표 목록이 들어 있으면 스킬범위로도 사용합니다.
+  legacy_range = skill_target if skill_target.upcase.scan(/[A-G][1-8]/).any?
+
   {
     name:    name,
     pos:     row[2].to_s.strip.upcase.empty? ? 'D4' : row[2].to_s.strip.upcase,
@@ -29,11 +40,14 @@ def parse_creature_stats_row(row)
     skill1:  row[10].to_s.strip,
     skill2:  row[11].to_s.strip,
     facing:  row[12].to_s.strip,
-    pattern: row[13].to_s.strip,
-    pattern_cells: row[14].to_s.strip,
-    debuff: row[15].to_s.strip,
-    cells: row[16].to_s.strip,
-    pattern_multiplier: row[17].to_s.strip,
+    current_skill: current_skill,
+    pattern: current_skill,
+    skill_target: skill_target,
+    skill_range: skill_range,
+    pattern_cells: skill_range.empty? ? legacy_range.to_s : skill_range,
+    debuff: debuff,
+    cells: custom_cells,
+    pattern_multiplier: multiplier,
     status:  ''
   }
 end
