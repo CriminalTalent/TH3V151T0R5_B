@@ -59,7 +59,15 @@ module BattleGrid
     [w, h]
   end
 
+  def parse_cell_list(text)
+    text.to_s.upcase.scan(/[A-Z][0-9]+/).select { |cell| valid_pos?(cell) }.uniq
+  end
+
   def creature_cells(creature)
+    explicit = creature[:cells] || creature[:occupied_cells] || creature[:점유칸]
+    explicit_cells = parse_cell_list(explicit)
+    return explicit_cells unless explicit_cells.empty?
+
     base = creature[:pos].to_s.strip.upcase
     width, height = parse_size(creature[:size] || creature[:크기] || creature[:body_size])
     x, y = parse_pos(base)
@@ -159,26 +167,31 @@ module BattleGrid
     true
   end
 
-  def render(runner_state, creature)
+  def render(runner_state, creature, pattern_cells: [])
     runner_by_pos = occupied_by_runners(runner_state)
     creature_by_pos = occupied_by_creature(creature)
+    pattern_cells = parse_cell_list(pattern_cells.join(' ')) if pattern_cells.is_a?(Array)
 
     lines = []
-    lines << '    A  B  C  D  E  F  G'
+    lines << '     A  B  C  D  E  F  G'
     ROWS.each do |row|
       y = row - 1
       cells = COLS.each_with_index.map do |_col, x|
         pos = format_pos(x, y)
         if runner_by_pos[pos]
-          'R'
+          '러'
         elsif creature_by_pos[pos]
-          'B'
+          '보'
+        elsif pattern_cells.include?(pos)
+          '범'
         else
-          '·'
+          '□'
         end
       end
-      lines << format('%2d  %s', row, cells.join('  '))
+      lines << format('%2d   %s', row, cells.join('  '))
     end
+    lines << ''
+    lines << '러 = 러너 / 보 = 보스 / 범 = 보스 패턴 범위 / □ = 빈칸'
     lines
   end
 end
