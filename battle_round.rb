@@ -439,46 +439,80 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   [log, runner_state]
 end
 
+def action_text_for_result(name, action, creature_name)
+  return "#{name}: 턴 상실" unless action
+
+  type = action[:type].to_s
+  target = action[:target].to_s
+
+  if type == '이동'
+    from = action[:from].to_s
+    to = action[:to].to_s.empty? ? target : action[:to].to_s
+    return "#{name}: 이동 #{from} → #{to}" unless from.empty?
+    return "#{name}: 이동 #{to}"
+  end
+
+  target = creature_name if ['크리쳐', creature_name].include?(target)
+  "#{name}: #{type} (#{target})"
+end
+
 def build_result_text(runner_tags, battle_round, creature, battle_actions, runner_names, log, runner_state, view_sheet, timeout: false)
-  creature_name   = creature[:name] || '크리쳐'
+  creature_name   = creature[:name].to_s.strip.empty? ? '크리쳐' : creature[:name].to_s.strip
   creature_hp     = creature[:hp].to_i
   creature_max_hp = (creature[:max_hp] || creature_hp).to_i
 
   title = timeout ? "[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)" : "[#{battle_round}라운드] #{creature_name} 전투 결과"
 
   result = "#{runner_tags}\n\n#{title}\n\n"
-  result += "───────────────────\n"
-
+  result += "────────────────────\n"
+  result += "행동\n"
   runner_names.each do |name|
-    action = battle_actions[name]
-    if action
-      result += "#{name}: [#{action[:type]}/#{action[:target]}]\n"
-    else
-      result += "#{name}: 턴 상실\n"
+    result += "#{action_text_for_result(name, battle_actions[name], creature_name)}\n"
+  end
+
+  moved = battle_actions.select { |_name, act| act && act[:type].to_s == '이동' && !act[:from].to_s.empty? }
+  if moved.any?
+    result += "\n이동\n"
+    moved.each do |name, act|
+      result += "#{name}: #{act[:from]} → #{act[:to]}\n"
     end
   end
 
-  result += "───────────────────\n"
-  result += "[전장]\n"
+  result += "────────────────────\n"
+  result += "전장\n\n"
   pattern_cells = BattleBossPatterns.pattern_cells(creature)
   BattleGrid.render(runner_state, creature, pattern_cells: pattern_cells).each { |line| result += "#{line}\n" }
-  result += "───────────────────\n"
-  log.each { |l| result += "#{l}\n" }
-  result += "───────────────────\n"
 
-  runner_state.select { |r| runner_names.include?(r[:name]) }.each do |r|
-    result += "#{r[:name]}: #{view_sheet.health_bar(r[:hp], r[:max_hp])} 위치 #{r[:pos]}\n"
+  result += "────────────────────\n"
+  result += "전투 로그\n"
+  log.each do |line|
+    pretty = line.to_s
+    if pretty.include?('→')
+      result += "▶ #{pretty}\n"
+    else
+      result += "#{pretty}\n"
+    end
   end
-  result += "#{creature_name}: #{view_sheet.health_bar(creature_hp, creature_max_hp)}\n"
-  result += "보스가 차지한 칸: #{BattleGrid.creature_cells(creature).join(' · ')}\n"
-  pattern_cells = BattleBossPatterns.pattern_cells(creature)
-  result += "보스 패턴 범위: #{pattern_cells.join(' · ')}\n" unless pattern_cells.empty?
+
+  result += "────────────────────\n"
+  result += "상태\n"
+  runner_state.select { |r| runner_names.include?(r[:name]) }.each do |r|
+    status_text = r[:status].to_s.strip
+    status_text = " / #{status_text}" unless status_text.empty?
+    result += "#{r[:name]}\n"
+    result += "#{view_sheet.health_bar(r[:hp], r[:max_hp])} / 위치 #{r[:pos]}#{status_text}\n\n"
+  end
+
+  result += "#{creature_name}\n"
+  result += "#{view_sheet.health_bar(creature_hp, creature_max_hp)}\n"
+  result += "점유칸: #{BattleGrid.creature_cells(creature).join(' · ')}\n"
+  result += "예고 범위: #{pattern_cells.join(' · ')}\n" unless pattern_cells.empty?
   result += "\n"
 
   if creature_hp <= 0
     result += "#{creature_name} 격파! 전투 승리!"
   elsif runner_state.none? { |r| runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
-    result += '전원 전투 불능... 전투 패배...'
+    result += '전원 전투 불능. 전투 패배.'
   else
     result += "#{ROUND_WAIT_SECONDS}초 후 다음 라운드가 시작됩니다."
   end
