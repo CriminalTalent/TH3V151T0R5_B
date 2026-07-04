@@ -480,8 +480,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
 
   result += "────────────────────\n"
   result += "전장\n\n"
-  pattern_cells = BattleBossPatterns.pattern_cells(creature)
-  BattleGrid.render(runner_state, creature, pattern_cells: pattern_cells).each { |line| result += "#{line}\n" }
+  BattleGrid.render(runner_state, creature).each { |line| result += "#{line}\n" }
 
   result += "────────────────────\n"
   result += "전투 로그\n"
@@ -506,7 +505,6 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   result += "#{creature_name}\n"
   result += "#{view_sheet.health_bar(creature_hp, creature_max_hp)}\n"
   result += "점유칸: #{BattleGrid.creature_cells(creature).join(' · ')}\n"
-  result += "예고 범위: #{pattern_cells.join(' · ')}\n" unless pattern_cells.empty?
   result += "\n"
 
   if creature_hp <= 0
