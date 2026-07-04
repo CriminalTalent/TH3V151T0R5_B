@@ -195,8 +195,14 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   match = text.match(/\[(#{command_pattern}|이동)\/(.+?)\]/)
 
   unless match
-    puts "[전투봇] 행동 형식 불일치: @#{username} -> #{text}"
-    listener.send_dm(username, '형식이 올바르지 않습니다. [공격/크리쳐], [스킬명/대상], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.')
+    # 다중 태그, 안내문, 잡담처럼 전투 명령이 아닌 글은 조용히 무시합니다.
+    # 단, 대괄호 명령처럼 보이는데 형식만 틀린 경우에만 안내합니다.
+    if text.match?(/\[[^\]]+\]/)
+      puts "[전투봇] 행동 형식 불일치: @#{username} -> #{text}"
+      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/크리쳐], [스킬명/대상], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.')
+    else
+      puts "[전투봇] 비명령 메시지 무시: @#{username} -> #{text}"
+    end
     processed_id_set.add(processed_id)
     return
   end
