@@ -6,7 +6,16 @@ def new_passive_ctx
     prev_took_damage: {},
     prev_action: {},
     slytherin_luck: Hash.new(0),
-    guard_used: {}
+    guard_used: {},
+    cooldowns: Hash.new { |h, k| h[k] = {} },
+    once_used: Hash.new { |h, k| h[k] = {} },
+    buffs: Hash.new { |h, k| h[k] = [] },
+    shields: Hash.new(0),
+    confusion: Hash.new(0),
+    sure_hit: {},
+    revenge: {},
+    cover: {},
+    survive_once: {}
   }
 end
 
