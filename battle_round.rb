@@ -53,6 +53,8 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   log = []
   took_damage = {}
 
+  BattleBossPatterns.apply_ongoing_debuffs!(log, runner_state, ctx)
+
   atk_bonus  = Hash.new(0)
   dur_bonus  = Hash.new(0)
   tec_bonus  = Hash.new(0)
@@ -330,7 +332,12 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     end
   end
 
-  # 4) 크리쳐 반격
+  # 4) 보스 패턴/디버프
+  if creature[:hp].to_i > 0
+    BattleBossPatterns.apply_pattern!(log, runner_state, creature, ctx)
+  end
+
+  # 5) 크리쳐 반격
   if creature[:hp].to_i > 0
     if ctx[:confusion][creature[:name]] >= 5
       log << "#{creature[:name]}은(는) 혼란 5중첩으로 행동할 수 없습니다."
@@ -452,8 +459,9 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   end
 
   result += "───────────────────\n"
-  result += "[배틀필드]\n"
-  BattleGrid.render(runner_state, creature).each { |line| result += "#{line}\n" }
+  result += "[전장]\n"
+  pattern_cells = BattleBossPatterns.pattern_cells(creature)
+  BattleGrid.render(runner_state, creature, pattern_cells: pattern_cells).each { |line| result += "#{line}\n" }
   result += "───────────────────\n"
   log.each { |l| result += "#{l}\n" }
   result += "───────────────────\n"
@@ -461,7 +469,11 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   runner_state.select { |r| runner_names.include?(r[:name]) }.each do |r|
     result += "#{r[:name]}: #{view_sheet.health_bar(r[:hp], r[:max_hp])} 위치 #{r[:pos]}\n"
   end
-  result += "#{creature_name}: #{view_sheet.health_bar(creature_hp, creature_max_hp)} 점유 #{BattleGrid.creature_cells(creature).join(', ')}\n\n"
+  result += "#{creature_name}: #{view_sheet.health_bar(creature_hp, creature_max_hp)}\n"
+  result += "보스가 차지한 칸: #{BattleGrid.creature_cells(creature).join(' · ')}\n"
+  pattern_cells = BattleBossPatterns.pattern_cells(creature)
+  result += "보스 패턴 범위: #{pattern_cells.join(' · ')}\n" unless pattern_cells.empty?
+  result += "\n"
 
   if creature_hp <= 0
     result += "#{creature_name} 격파! 전투 승리!"
