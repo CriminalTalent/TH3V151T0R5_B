@@ -15,7 +15,9 @@ def new_passive_ctx
     sure_hit: {},
     revenge: {},
     cover: {},
-    survive_once: {}
+    survive_once: {},
+    debuffs: Hash.new { |h, k| h[k] = [] },
+    stun: {}
   }
 end
 
