@@ -10,14 +10,12 @@ module BattleGrid
   def parse_pos(pos)
     text = pos.to_s.strip.upcase
     return nil unless text.match?(/\A[A-G][1-8]\z/)
-
     [COLS.index(text[0]), text[1].to_i - 1]
   end
 
   def format_pos(x, y)
     return nil unless x && y
     return nil unless x.between?(0, COLS.size - 1) && y.between?(0, ROWS.size - 1)
-
     "#{COLS[x]}#{y + 1}"
   end
 
@@ -29,8 +27,6 @@ module BattleGrid
     ax, ay = parse_pos(a)
     bx, by = parse_pos(b)
     return nil unless ax && bx
-
-    # 대각선을 1칸으로 취급하는 체비셰프 거리.
     [(ax - bx).abs, (ay - by).abs].max
   end
 
@@ -38,7 +34,6 @@ module BattleGrid
     ax, ay = parse_pos(a)
     bx, by = parse_pos(b)
     return nil unless ax && bx
-
     (ax - bx).abs + (ay - by).abs
   end
 
@@ -51,7 +46,6 @@ module BattleGrid
     text = size.to_s.strip.downcase
     match = text.match(/(\d+)\s*x\s*(\d+)/)
     return [1, 1] unless match
-
     w = match[1].to_i
     h = match[2].to_i
     w = 1 if w <= 0
@@ -124,7 +118,6 @@ module BattleGrid
   def distance_to_creature(pos, creature)
     cells = creature_cells(creature)
     return nil if cells.empty?
-
     cells.map { |cell| distance(pos, cell) }.compact.min
   end
 
@@ -167,31 +160,112 @@ module BattleGrid
     true
   end
 
-  def render(runner_state, creature, pattern_cells: [])
+  # ──────────────────────────────────────────────
+  # 전장 표시용 약칭
+  # ──────────────────────────────────────────────
+
+  def display_name_for_runner(name, runner_state = [])
+    runner = runner_state.to_a.find { |r| r[:name].to_s == name.to_s }
+    display = runner && (runner[:display_name] || runner[:label] || runner[:name])
+    display.to_s.strip.empty? ? name.to_s : display.to_s.strip
+  end
+
+  def first_chars(text, length)
+    chars = text.to_s.strip.each_char.to_a
+    value = chars.first(length).join
+    value.empty? ? '?' : value
+  end
+
+  def unique_symbol_map(names)
+    labels = names.map { |n| [n, n.to_s.strip] }.to_h
+    result = {}
+    used = {}
+
+    names.each do |name|
+      label = labels[name]
+      symbol = nil
+      max_len = [label.each_char.count, 1].max
+      (1..max_len).each do |len|
+        candidate = first_chars(label, len)
+        unless used[candidate]
+          symbol = candidate
+          break
+        end
+      end
+      unless symbol
+        base = first_chars(label, 1)
+        i = 2
+        i += 1 while used["#{base}#{i}"]
+        symbol = "#{base}#{i}"
+      end
+      used[symbol] = true
+      result[name] = symbol
+    end
+
+    result
+  end
+
+  def symbol_maps(runner_state, creature)
+    runner_names = runner_state.to_a.map { |r| r[:name].to_s }.reject(&:empty?).uniq
+    runner_labels = runner_names.map { |n| display_name_for_runner(n, runner_state) }
+    creature_name = creature[:name].to_s.strip.empty? ? '보스' : creature[:name].to_s.strip
+
+    all_display_names = runner_labels + [creature_name]
+    all_symbols = unique_symbol_map(all_display_names)
+
+    runner_symbol_by_name = {}
+    runner_names.each_with_index do |name, idx|
+      display = runner_labels[idx]
+      runner_symbol_by_name[name] = all_symbols[display]
+    end
+
+    creature_symbol = all_symbols[creature_name]
+    [runner_symbol_by_name, creature_symbol, creature_name]
+  end
+
+  def render(runner_state, creature, pattern_cells: [], danger_cells: [], heal_cells: [])
     runner_by_pos = occupied_by_runners(runner_state)
     creature_by_pos = occupied_by_creature(creature)
     pattern_cells = parse_cell_list(pattern_cells.join(' ')) if pattern_cells.is_a?(Array)
+    danger_cells = parse_cell_list(danger_cells.join(' ')) if danger_cells.is_a?(Array)
+    heal_cells = parse_cell_list(heal_cells.join(' ')) if heal_cells.is_a?(Array)
+
+    runner_symbols, creature_symbol, creature_name = symbol_maps(runner_state, creature)
 
     lines = []
-    lines << '     A  B  C  D  E  F  G'
+    lines << '      A   B   C   D   E   F   G'
     ROWS.each do |row|
       y = row - 1
       cells = COLS.each_with_index.map do |_col, x|
         pos = format_pos(x, y)
-        if runner_by_pos[pos]
-          '러'
-        elsif creature_by_pos[pos]
-          '보'
-        elsif pattern_cells.include?(pos)
-          '범'
-        else
-          '□'
-        end
+        mark = if runner_by_pos[pos]
+                 runner_symbols[runner_by_pos[pos]] || '러'
+               elsif creature_by_pos[pos]
+                 creature_symbol || '보'
+               elsif danger_cells.include?(pos)
+                 '※'
+               elsif pattern_cells.include?(pos)
+                 '범'
+               elsif heal_cells.include?(pos)
+                 '♥'
+               else
+                 '□'
+               end
+        mark.to_s.ljust(2)
       end
-      lines << format('%2d   %s', row, cells.join('  '))
+      lines << format('%2d   %s', row, cells.join(' '))
     end
+
     lines << ''
-    lines << '러 = 러너 / 보 = 보스 / 범 = 보스 패턴 범위 / □ = 빈칸'
+    lines << '[약칭]'
+    runner_state.to_a.each do |runner|
+      name = runner[:name].to_s
+      display = display_name_for_runner(name, runner_state)
+      symbol = runner_symbols[name] || '러'
+      lines << "#{symbol} = #{display}"
+    end
+    lines << "#{creature_symbol} = #{creature_name}"
+    lines << '범 = 예고 범위 / ※ = 위험 범위 / ♥ = 회복 구역 / □ = 빈칸'
     lines
   end
 end
