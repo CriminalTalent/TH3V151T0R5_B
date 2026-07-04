@@ -223,13 +223,9 @@ module BattleGrid
     [runner_symbol_by_name, creature_symbol, creature_name]
   end
 
-  def render(runner_state, creature, pattern_cells: [], danger_cells: [], heal_cells: [])
+  def render(runner_state, creature)
     runner_by_pos = occupied_by_runners(runner_state)
     creature_by_pos = occupied_by_creature(creature)
-    pattern_cells = parse_cell_list(pattern_cells.join(' ')) if pattern_cells.is_a?(Array)
-    danger_cells = parse_cell_list(danger_cells.join(' ')) if danger_cells.is_a?(Array)
-    heal_cells = parse_cell_list(heal_cells.join(' ')) if heal_cells.is_a?(Array)
-
     runner_symbols, creature_symbol, creature_name = symbol_maps(runner_state, creature)
 
     lines = []
@@ -242,12 +238,6 @@ module BattleGrid
                  runner_symbols[runner_by_pos[pos]] || '러'
                elsif creature_by_pos[pos]
                  creature_symbol || '보'
-               elsif danger_cells.include?(pos)
-                 '※'
-               elsif pattern_cells.include?(pos)
-                 '범'
-               elsif heal_cells.include?(pos)
-                 '♥'
                else
                  '□'
                end
@@ -265,7 +255,7 @@ module BattleGrid
       lines << "#{symbol} = #{display}"
     end
     lines << "#{creature_symbol} = #{creature_name}"
-    lines << '범 = 예고 범위 / ※ = 위험 범위 / ♥ = 회복 구역 / □ = 빈칸'
+    lines << '□ = 빈칸'
     lines
   end
 end
