@@ -98,13 +98,16 @@ def battle_end_text?(text)
 end
 
 def announce_round(session, view_sheet)
+  attack_lines = ['[공격/크리쳐]']
+  creature_name = session.creature[:name].to_s.strip
+  attack_lines << "[공격/#{creature_name}]" unless creature_name.empty? || creature_name == '크리쳐'
+
   announcement = "#{session.runner_tags}\n\n[#{session.round}라운드] #{session.creature[:name]}와의 전투!\n" \
                  "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
                  "───────────────────\n" \
                  "DM 또는 멘션으로 행동을 입력해주세요.\n\n" \
                  "형식:\n" \
-                 "[공격/크리쳐]\n" \
-                 "[공격/#{session.creature[:name]}]\n" \
+                 "#{attack_lines.join("\n")}\n" \
                  "[회복/아이디]\n" \
                  "[방어/아이디]\n" \
                  "[이동/좌표]\n\n" \
