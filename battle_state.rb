@@ -29,6 +29,11 @@ def parse_creature_stats_row(row)
     skill1:  row[10].to_s.strip,
     skill2:  row[11].to_s.strip,
     facing:  row[12].to_s.strip,
+    pattern: row[13].to_s.strip,
+    pattern_cells: row[14].to_s.strip,
+    debuff: row[15].to_s.strip,
+    cells: row[16].to_s.strip,
+    pattern_multiplier: row[17].to_s.strip,
     status:  ''
   }
 end
@@ -71,6 +76,10 @@ def attach_creature_size_from_sheet(creature, creature_sheet)
     size_cell = row[3].to_s.strip
     size_cell = row.find { |cell| cell.to_s.strip.match?(/\A\d+\s*x\s*\d+\z/i) }.to_s.strip if size_cell.empty?
     creature[:size] = size_cell.downcase unless size_cell.empty?
+
+    # 임의 점유칸: A1 C6 G8 같은 식으로 입력 가능. H열은 7x8 규격 밖이라 무시됩니다.
+    cell_text = row.find { |cell| cell.to_s.upcase.scan(/[A-Z][0-9]+/).any? }
+    creature[:cells] ||= cell_text.to_s.strip if cell_text && cell_text.to_s !~ /\A\d+\s*x\s*\d+\z/i
   end
 
   creature[:size] = '1x1' if creature[:size].to_s.strip.empty?
@@ -107,6 +116,7 @@ def creature_from_start_content(content, creature_sheet)
   pos = pos.to_s.strip.upcase
 
   size = content.to_s.match(/크기[:=：]\s*(\d+\s*x\s*\d+)/i)&.[](1).to_s.strip.downcase
+  cells = content.to_s.match(/(?:점유칸|칸|범위)[:=：]\s*([A-G][1-8](?:[ ,]+[A-G][1-8])*)/i)&.[](1).to_s.strip.upcase
 
   # [전투시작]에 크리쳐명이 없거나 '크리쳐'만 쓰였으면 활성 체크된 행을 우선 사용합니다.
   stats = if name.empty? || name == '크리쳐'
@@ -132,6 +142,7 @@ def creature_from_start_content(content, creature_sheet)
   stats[:name] = name unless name.empty? || name == '크리쳐'
   stats[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
   stats[:size] = size unless size.empty?
+  stats[:cells] = cells unless cells.empty?
   attach_creature_size_from_sheet(stats, creature_sheet)
 rescue => e
   puts "[전투봇] 전투시작문 크리쳐 파싱 실패: #{e.class}: #{e.message}"
@@ -148,7 +159,7 @@ def build_fallback_runner_state(runner_names, runner_sheet, default_pos)
 
     {
       name:    name,
-      pos:     default_pos.to_s.strip.empty? ? 'D4' : default_pos.to_s.strip.upcase,
+      pos:     'D3',
       hp:      hp,
       max_hp:  hp,
       status:  '',
@@ -160,7 +171,7 @@ rescue => e
   runner_names.map do |name|
     {
       name:    name,
-      pos:     default_pos.to_s.strip.empty? ? 'D4' : default_pos.to_s.strip.upcase,
+      pos:     'D3',
       hp:      50,
       max_hp:  50,
       status:  '',
