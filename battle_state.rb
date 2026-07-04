@@ -7,24 +7,39 @@ def truthy_value?(value)
 end
 
 def parse_creature_stats_row(row)
-  # 크리쳐 시트 / 스탯 탭 현재 구조:
-  # A 활성, B 이름, C 위치, D 크기, E 건강, F 내구도, G 마법능력, H 민첩, I 기술, J 행운, K 스킬1...
+  # 크리쳐 시트 / 스탯 탭 최종 구조:
+  # A 활성
+  # B 이름
+  # C 위치
+  # D 크기
+  # E 현재스킬
+  # F 스킬대상
+  # G 스킬범위
+  # H 디버프
+  # I 점유칸
+  # J 배율
+  # K 쿨타임
+  # L 건강
+  # M 내구도
+  # N 마법능력
+  # O 민첩
+  # P 기술
+  # Q 행운
+  # R 비고
   name = row[1].to_s.strip
   return nil if name.empty?
 
-  hp = row[4].to_i
+  hp = row[11].to_i
   hp = 200 if hp <= 0
 
-  # N 현재스킬/이번턴스킬, O 스킬대상, P 스킬범위, Q 디버프, R 점유칸, S 배율
-  current_skill = row[13].to_s.strip
-  skill_target  = row[14].to_s.strip
-  skill_range   = row[15].to_s.strip
-  debuff        = row[16].to_s.strip
-  custom_cells  = row[17].to_s.strip
-  multiplier    = row[18].to_s.strip
-
-  # 구버전 호환: O열에 좌표 목록이 들어 있으면 스킬범위로도 사용합니다.
-  legacy_range = skill_target if skill_target.upcase.scan(/[A-G][1-8]/).any?
+  current_skill = row[4].to_s.strip
+  skill_target  = row[5].to_s.strip
+  skill_range   = row[6].to_s.strip
+  debuff        = row[7].to_s.strip
+  custom_cells  = row[8].to_s.strip
+  multiplier    = row[9].to_s.strip
+  cooldown      = row[10].to_s.strip
+  note          = row[17].to_s.strip
 
   {
     name:    name,
@@ -32,24 +47,75 @@ def parse_creature_stats_row(row)
     size:    row[3].to_s.strip.downcase.empty? ? '1x1' : row[3].to_s.strip.downcase,
     hp:      hp,
     max_hp:  hp,
-    dur:     row[5].to_i,
-    atk:     row[6].to_i,
-    agi:     row[7].to_i,
-    tec:     row[8].to_i,
-    luck:    row[9].to_i,
-    skill1:  row[10].to_s.strip,
-    skill2:  row[11].to_s.strip,
-    facing:  row[12].to_s.strip,
+    dur:     row[12].to_i,
+    atk:     row[13].to_i,
+    agi:     row[14].to_i,
+    tec:     row[15].to_i,
+    luck:    row[16].to_i,
     current_skill: current_skill,
     pattern: current_skill,
     skill_target: skill_target,
     skill_range: skill_range,
-    pattern_cells: skill_range.empty? ? legacy_range.to_s : skill_range,
+    pattern_cells: skill_range,
     debuff: debuff,
     cells: custom_cells,
     pattern_multiplier: multiplier,
+    pattern_cooldown: cooldown,
+    note: note,
     status:  ''
   }
+end
+
+# 보스스킬 탭 최종 구조:
+# A 스킬명, B 분류, C 범위, D 쿨타임, E 배율, F 디버프,
+# G 피해공식, H 범위형태, I 이동회피, J 대상수, K 설명
+def read_boss_skill_definition(creature_sheet, skill_name)
+  skill_name = skill_name.to_s.strip
+  return {} if skill_name.empty? || skill_name == '-'
+
+  rows = creature_sheet.read('보스스킬!A2:K300') rescue []
+  row = rows.find { |r| r[0].to_s.strip == skill_name }
+  return {} unless row
+
+  {
+    skill_name:     row[0].to_s.strip,
+    skill_category: row[1].to_s.strip,
+    skill_range_default: row[2].to_s.strip,
+    skill_cooldown_default: row[3].to_s.strip,
+    skill_multiplier_default: row[4].to_s.strip,
+    skill_debuff_default: row[5].to_s.strip,
+    damage_formula: row[6].to_s.strip,
+    range_shape:    row[7].to_s.strip,
+    dodgeable:      row[8].to_s.strip,
+    target_count:   row[9].to_s.strip,
+    skill_desc:     row[10].to_s.strip
+  }
+rescue => e
+  puts "[전투봇] 보스스킬 읽기 실패: #{e.class}: #{e.message}"
+  {}
+end
+
+def apply_boss_skill_definition!(creature, creature_sheet)
+  skill_name = creature[:current_skill].to_s.strip
+  skill_name = creature[:pattern].to_s.strip if skill_name.empty?
+  definition = read_boss_skill_definition(creature_sheet, skill_name)
+  return creature if definition.empty?
+
+  creature.merge!(definition)
+
+  # 스탯 탭에서 직접 지정한 값이 우선입니다. 비어 있으면 보스스킬 탭 기본값을 사용합니다.
+  creature[:pattern_multiplier] = definition[:skill_multiplier_default] if creature[:pattern_multiplier].to_s.strip.empty?
+  creature[:debuff] = definition[:skill_debuff_default] if creature[:debuff].to_s.strip.empty?
+  creature[:pattern_cooldown] = definition[:skill_cooldown_default] if creature[:pattern_cooldown].to_s.strip.empty?
+
+  # 스킬범위가 좌표 목록이면 그대로 쓰고, 비어 있으면 보스스킬 탭의 범위/범위형태를 참고합니다.
+  if creature[:skill_range].to_s.strip.empty?
+    range_default = definition[:skill_range_default].to_s.strip
+    creature[:skill_range] = range_default if BattleGrid.parse_cell_list(range_default).any?
+    creature[:pattern_cells] = creature[:skill_range]
+  end
+
+  creature
 end
 
 def active_creature_from_stats_sheet(creature_sheet)
@@ -88,12 +154,11 @@ def attach_creature_size_from_sheet(creature, creature_sheet)
 
   if row
     size_cell = row[3].to_s.strip
-    size_cell = row.find { |cell| cell.to_s.strip.match?(/\A\d+\s*x\s*\d+\z/i) }.to_s.strip if size_cell.empty?
     creature[:size] = size_cell.downcase unless size_cell.empty?
 
-    # 임의 점유칸: A1 C6 G8 같은 식으로 입력 가능. H열은 7x8 규격 밖이라 무시됩니다.
-    cell_text = row.find { |cell| cell.to_s.upcase.scan(/[A-Z][0-9]+/).any? }
-    creature[:cells] ||= cell_text.to_s.strip if cell_text && cell_text.to_s !~ /\A\d+\s*x\s*\d+\z/i
+    # I열 점유칸: A1 C6 G8 같은 식으로 입력 가능. H8처럼 7x8 규격 밖인 칸은 무시됩니다.
+    cell_text = row[8].to_s.strip
+    creature[:cells] = cell_text unless cell_text.empty?
   end
 
   creature[:size] = '1x1' if creature[:size].to_s.strip.empty?
@@ -106,7 +171,7 @@ end
 
 def current_creature(creature_sheet)
   active = active_creature_from_stats_sheet(creature_sheet)
-  return attach_creature_size_from_sheet(active, creature_sheet) if active
+  return apply_boss_skill_definition!(attach_creature_size_from_sheet(active, creature_sheet), creature_sheet) if active
 
   config = creature_sheet.read_creature_config || { name: '크리쳐', pos: nil }
   stats  = creature_from_stats_sheet_by_name(creature_sheet, config[:name]) || creature_sheet.read_creature_stats(config[:name]) || {
@@ -117,7 +182,7 @@ def current_creature(creature_sheet)
     size: '1x1'
   }
   stats[:pos] = config[:pos] if config[:pos].to_s.match?(/^[A-G][1-8]$/)
-  attach_creature_size_from_sheet(stats, creature_sheet)
+  apply_boss_skill_definition!(attach_creature_size_from_sheet(stats, creature_sheet), creature_sheet)
 end
 
 def creature_from_start_content(content, creature_sheet)
@@ -157,7 +222,7 @@ def creature_from_start_content(content, creature_sheet)
   stats[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
   stats[:size] = size unless size.empty?
   stats[:cells] = cells unless cells.empty?
-  attach_creature_size_from_sheet(stats, creature_sheet)
+  apply_boss_skill_definition!(attach_creature_size_from_sheet(stats, creature_sheet), creature_sheet)
 rescue => e
   puts "[전투봇] 전투시작문 크리쳐 파싱 실패: #{e.class}: #{e.message}"
   current_creature(creature_sheet)
@@ -243,7 +308,7 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   if BattleSkills.attack?(action_type)
     creature_name = creature[:name].to_s
     unless ['크리쳐', creature_name].include?(target) || BattleGrid.valid_pos?(target)
-      return [false, "대상을 찾을 수 없습니다. [#{action_type}/크리쳐] 또는 [#{action_type}/#{creature_name}] 형식으로 입력해주세요."]
+      return [false, "대상을 찾을 수 없습니다. [#{action_type}/#{creature_name}] 형식으로 입력해주세요."]
     end
 
     unless BattleGrid.in_range?(actor[:pos], target, skill[:range], creature: creature)
