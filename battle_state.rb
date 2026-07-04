@@ -1,6 +1,61 @@
 # battle_state.rb
 # encoding: UTF-8
 
+def truthy_value?(value)
+  text = value.to_s.strip.upcase
+  value == true || text == 'TRUE' || text == '1' || text == 'ON' || text == 'YES' || text == 'Y' || text == '✓' || text == '✔'
+end
+
+def parse_creature_stats_row(row)
+  # 크리쳐 시트 / 스탯 탭 현재 구조:
+  # A 활성, B 이름, C 위치, D 크기, E 건강, F 내구도, G 마법능력, H 민첩, I 기술, J 행운, K 스킬1...
+  name = row[1].to_s.strip
+  return nil if name.empty?
+
+  hp = row[4].to_i
+  hp = 200 if hp <= 0
+
+  {
+    name:    name,
+    pos:     row[2].to_s.strip.upcase.empty? ? 'D4' : row[2].to_s.strip.upcase,
+    size:    row[3].to_s.strip.downcase.empty? ? '1x1' : row[3].to_s.strip.downcase,
+    hp:      hp,
+    max_hp:  hp,
+    dur:     row[5].to_i,
+    atk:     row[6].to_i,
+    agi:     row[7].to_i,
+    tec:     row[8].to_i,
+    luck:    row[9].to_i,
+    skill1:  row[10].to_s.strip,
+    skill2:  row[11].to_s.strip,
+    facing:  row[12].to_s.strip,
+    status:  ''
+  }
+end
+
+def active_creature_from_stats_sheet(creature_sheet)
+  rows = creature_sheet.read('스탯!A2:Z100') rescue []
+  row = rows.find { |r| truthy_value?(r[0]) && !r[1].to_s.strip.empty? }
+  return nil unless row
+  parse_creature_stats_row(row)
+rescue => e
+  puts "[전투봇] 활성 크리쳐 스탯 읽기 실패: #{e.class}: #{e.message}"
+  nil
+end
+
+def creature_from_stats_sheet_by_name(creature_sheet, creature_name)
+  target = creature_name.to_s.strip
+  return nil if target.empty?
+
+  rows = creature_sheet.read('스탯!A2:Z100') rescue []
+  row = rows.find { |r| r[1].to_s.strip == target }
+  return nil unless row
+  parse_creature_stats_row(row)
+rescue => e
+  puts "[전투봇] 크리쳐 스탯 이름 검색 실패: #{e.class}: #{e.message}"
+  nil
+end
+
 # 크리쳐 스탯 시트에서 크기 컬럼을 아직 못 읽는 구버전 sheet_manager 호환용.
 # 스탯 탭에 '크기=3x1' 같은 텍스트가 어느 셀에 있으면 잡아냅니다.
 def attach_creature_size_from_sheet(creature, creature_sheet)
@@ -9,12 +64,13 @@ def attach_creature_size_from_sheet(creature, creature_sheet)
 
   rows = creature_sheet.read('스탯!A2:Z100') rescue []
   row = rows.find do |r|
-    r[0].to_s.strip == name || r[1].to_s.strip == name
+    r[1].to_s.strip == name || r[0].to_s.strip == name
   end
 
   if row
-    size_cell = row.find { |cell| cell.to_s.strip.match?(/\A\d+\s*x\s*\d+\z/i) }
-    creature[:size] = size_cell.to_s.strip.downcase unless size_cell.to_s.strip.empty?
+    size_cell = row[3].to_s.strip
+    size_cell = row.find { |cell| cell.to_s.strip.match?(/\A\d+\s*x\s*\d+\z/i) }.to_s.strip if size_cell.empty?
+    creature[:size] = size_cell.downcase unless size_cell.empty?
   end
 
   creature[:size] = '1x1' if creature[:size].to_s.strip.empty?
@@ -26,12 +82,16 @@ rescue => e
 end
 
 def current_creature(creature_sheet)
+  active = active_creature_from_stats_sheet(creature_sheet)
+  return attach_creature_size_from_sheet(active, creature_sheet) if active
+
   config = creature_sheet.read_creature_config || { name: '크리쳐', pos: nil }
-  stats  = creature_sheet.read_creature_stats(config[:name]) || {
+  stats  = creature_from_stats_sheet_by_name(creature_sheet, config[:name]) || creature_sheet.read_creature_stats(config[:name]) || {
     name: config[:name] || '크리쳐',
     hp: 200,
     max_hp: 200,
-    pos: 'D4'
+    pos: 'D4',
+    size: '1x1'
   }
   stats[:pos] = config[:pos] if config[:pos].to_s.match?(/^[A-G][1-8]$/)
   attach_creature_size_from_sheet(stats, creature_sheet)
@@ -41,7 +101,6 @@ def creature_from_start_content(content, creature_sheet)
   name = content.to_s.match(/크리쳐\s*[「『](.+?)[」』]\s*출현/)&.[](1)
   name = content.to_s.match(/상대[:：]\s*([^\n]+)/)&.[](1) if name.to_s.strip.empty?
   name = name.to_s.strip
-  name = '크리쳐' if name.empty?
 
   pos = content.to_s.match(/위치[:：]\s*([A-G][1-8])/i)&.[](1)
   pos = content.to_s.match(/@\s*([A-G][1-8])/i)&.[](1) if pos.to_s.strip.empty?
@@ -49,9 +108,15 @@ def creature_from_start_content(content, creature_sheet)
 
   size = content.to_s.match(/크기[:=：]\s*(\d+\s*x\s*\d+)/i)&.[](1).to_s.strip.downcase
 
-  stats = creature_sheet.read_creature_stats(name)
-  stats = {
-    name: name,
+  # [전투시작]에 크리쳐명이 없거나 '크리쳐'만 쓰였으면 활성 체크된 행을 우선 사용합니다.
+  stats = if name.empty? || name == '크리쳐'
+            current_creature(creature_sheet)
+          else
+            creature_from_stats_sheet_by_name(creature_sheet, name) || creature_sheet.read_creature_stats(name)
+          end
+
+  stats ||= {
+    name: name.empty? ? '크리쳐' : name,
     hp: 200,
     max_hp: 200,
     dur: 10,
@@ -60,10 +125,11 @@ def creature_from_start_content(content, creature_sheet)
     tec: 0,
     luck: 0,
     pos: 'D4',
+    size: '1x1',
     status: ''
-  } unless stats
+  }
 
-  stats[:name] = name
+  stats[:name] = name unless name.empty? || name == '크리쳐'
   stats[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
   stats[:size] = size unless size.empty?
   attach_creature_size_from_sheet(stats, creature_sheet)
