@@ -264,7 +264,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   puts "[전투봇] 행동 수신: @#{username} -> #{text}"
 
   if processed_messages[username]
-    listener.send_dm(username, '이미 이번 라운드 행동을 제출했습니다.')
+    puts "[전투봇] 중복 행동 무시: @#{username} -> #{text}"
     processed_id_set.add(processed_id)
     return
   end
@@ -276,7 +276,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     # 단, 대괄호 명령처럼 보이는데 형식만 틀린 경우에만 안내합니다.
     if text.match?(/\[[^\]]+\]/)
       puts "[전투봇] 행동 형식 불일치: @#{username} -> #{text}"
-      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/크리쳐], [스킬명/대상], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.')
+      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/보스이름], [스킬명/대상], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.')
     else
       puts "[전투봇] 비명령 메시지 무시: @#{username} -> #{text}"
     end
@@ -296,6 +296,8 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     return
   end
 
+  action_meta = {}
+
   if action_type == '이동'
     coord = LOCATION_MAP[action_target] || action_target
     coord = coord.to_s.strip.upcase
@@ -304,16 +306,19 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     runner = runner_state.find { |r| r[:name].to_s == username.to_s }
 
     if runner
+      from_pos = runner[:pos].to_s.strip.upcase
       runner[:pos] = coord
       view_sheet.update_runner_state(runner_state)
-      puts "[전투봇] #{username} 이동 → #{coord}"
+      action_meta[:from] = from_pos
+      action_meta[:to] = coord
+      puts "[전투봇] #{username} 이동 #{from_pos} → #{coord}"
     end
   end
 
   battle_actions[username] = {
     type: action_type,
     target: action_target
-  }
+  }.merge(action_meta)
 
   processed_messages[username] = true
   processed_id_set.add(processed_id)
