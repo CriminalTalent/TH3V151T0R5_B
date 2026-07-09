@@ -7,39 +7,26 @@ def truthy_value?(value)
 end
 
 def parse_creature_stats_row(row)
-  # 크리쳐 시트 / 스탯 탭 최종 구조:
+  # 크리쳐 시트 / 스탯 탭 간소화 구조:
   # A 활성
   # B 이름
   # C 위치
   # D 크기
   # E 현재스킬
-  # F 스킬대상
-  # G 스킬범위
-  # H 디버프
-  # I 점유칸
-  # J 배율
-  # K 쿨타임
-  # L 건강
-  # M 내구도
-  # N 마법능력
-  # O 민첩
-  # P 기술
-  # Q 행운
-  # R 비고
+  # F 건강
+  # G 내구도
+  # H 마법능력
+  # I 민첩
+  # J 기술
+  # K 행운
+  # L 비고
   name = row[1].to_s.strip
   return nil if name.empty?
 
-  hp = row[11].to_i
+  hp = row[5].to_i
   hp = 200 if hp <= 0
 
   current_skill = row[4].to_s.strip
-  skill_target  = row[5].to_s.strip
-  skill_range   = row[6].to_s.strip
-  debuff        = row[7].to_s.strip
-  custom_cells  = row[8].to_s.strip
-  multiplier    = row[9].to_s.strip
-  cooldown      = row[10].to_s.strip
-  note          = row[17].to_s.strip
 
   {
     name:    name,
@@ -47,22 +34,22 @@ def parse_creature_stats_row(row)
     size:    row[3].to_s.strip.downcase.empty? ? '1x1' : row[3].to_s.strip.downcase,
     hp:      hp,
     max_hp:  hp,
-    dur:     row[12].to_i,
-    atk:     row[13].to_i,
-    agi:     row[14].to_i,
-    tec:     row[15].to_i,
-    luck:    row[16].to_i,
+    dur:     row[6].to_i,
+    atk:     row[7].to_i,
+    agi:     row[8].to_i,
+    tec:     row[9].to_i,
+    luck:    row[10].to_i,
     current_skill: current_skill,
     pattern: current_skill,
-    skill_target: skill_target,
-    skill_range: skill_range,
-    pattern_cells: skill_range,
-    debuff: debuff,
-    cells: custom_cells,
-    pattern_multiplier: multiplier,
-    pattern_cooldown: cooldown,
-    note: note,
-    status:  ''
+    skill_target: '',
+    skill_range: '',
+    pattern_cells: '',
+    debuff: '',
+    cells: '',
+    pattern_multiplier: '',
+    pattern_cooldown: '',
+    note: row[11].to_s.strip,
+    status: ''
   }
 end
 
@@ -103,16 +90,19 @@ def apply_boss_skill_definition!(creature, creature_sheet)
 
   creature.merge!(definition)
 
-  # 스탯 탭에서 직접 지정한 값이 우선입니다. 비어 있으면 보스스킬 탭 기본값을 사용합니다.
+  # 스탯 탭에서는 현재스킬만 운영하고, 세부값은 보스스킬 탭 기본값을 사용합니다.
   creature[:pattern_multiplier] = definition[:skill_multiplier_default] if creature[:pattern_multiplier].to_s.strip.empty?
   creature[:debuff] = definition[:skill_debuff_default] if creature[:debuff].to_s.strip.empty?
   creature[:pattern_cooldown] = definition[:skill_cooldown_default] if creature[:pattern_cooldown].to_s.strip.empty?
 
-  # 스킬범위가 좌표 목록이면 그대로 쓰고, 비어 있으면 보스스킬 탭의 범위/범위형태를 참고합니다.
+  # 보스스킬 탭 범위가 좌표 목록이면 패턴 좌표로 사용합니다.
+  # 숫자 범위는 battle_boss_patterns.rb에서 보스 점유칸 기준 거리로 처리합니다.
   if creature[:skill_range].to_s.strip.empty?
     range_default = definition[:skill_range_default].to_s.strip
-    creature[:skill_range] = range_default if BattleGrid.parse_cell_list(range_default).any?
-    creature[:pattern_cells] = creature[:skill_range]
+    if BattleGrid.parse_cell_list(range_default).any?
+      creature[:skill_range] = range_default
+      creature[:pattern_cells] = range_default
+    end
   end
 
   creature
@@ -141,8 +131,8 @@ rescue => e
   nil
 end
 
-# 크리쳐 스탯 시트에서 크기 컬럼을 아직 못 읽는 구버전 sheet_manager 호환용.
-# 스탯 탭에 '크기=3x1' 같은 텍스트가 어느 셀에 있으면 잡아냅니다.
+# 크리쳐 스탯 탭 간소화 구조용.
+# 위치/크기는 스탯 탭 C/D열에서 읽고, 점유칸은 기본적으로 크기에서 자동 계산합니다.
 def attach_creature_size_from_sheet(creature, creature_sheet)
   name = creature[:name].to_s.strip
   return creature if name.empty?
@@ -153,12 +143,11 @@ def attach_creature_size_from_sheet(creature, creature_sheet)
   end
 
   if row
+    pos_cell = row[2].to_s.strip.upcase
+    creature[:pos] = pos_cell if pos_cell.match?(/\A[A-G][1-8]\z/)
+
     size_cell = row[3].to_s.strip
     creature[:size] = size_cell.downcase unless size_cell.empty?
-
-    # I열 점유칸: A1 C6 G8 같은 식으로 입력 가능. H8처럼 7x8 규격 밖인 칸은 무시됩니다.
-    cell_text = row[8].to_s.strip
-    creature[:cells] = cell_text unless cell_text.empty?
   end
 
   creature[:size] = '1x1' if creature[:size].to_s.strip.empty?
