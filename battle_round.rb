@@ -353,7 +353,8 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     next unless cooldown_gate!(ctx, log, name, skill_name, skill)
 
     sure = ctx[:sure_hit].delete(name)
-    hit_ok = sure || skill[:kind] == :sacrifice_attack || BattleCalculator.hit?(s[:tec].to_i + tec_bonus[name])
+    hit_detail = BattleCalculator.hit_detail(s[:tec].to_i + tec_bonus[name])
+    hit_ok = sure || skill[:kind] == :sacrifice_attack || hit_detail[:success]
     unless hit_ok
       log << "#{name}의 #{skill_name} → 빗나감!"
       next
@@ -366,7 +367,15 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       end
     end
 
-    crit = sure || BattleCalculator.critical?(s[:luck].to_i + luck_bonus[name])
+    crit_detail = BattleCalculator.critical_detail(s[:luck].to_i + luck_bonus[name])
+    crit = sure || crit_detail[:success]
+
+    unless sure || skill[:kind] == :sacrifice_attack
+      log << "판정 결과"
+      log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '실패'})"
+      log << "크리티컬 #{crit_detail[:rate]}% → #{crit_detail[:roll]} (#{crit_detail[:success] ? '크리티컬' : '일반'})"
+      log << ""
+    end
     eff_atk = s[:atk].to_i + atk_bonus[name]
     multiplier = skill[:multiplier] || 1.0
 
