@@ -260,8 +260,20 @@ rescue => e
 end
 
 def merge_runner_state(view_sheet, runner_sheet, runner_names, default_pos)
+  runner_names = runner_names.map(&:to_s).uniq
+
   current = view_sheet.read_runner_state
   current = [] unless current.is_a?(Array)
+
+  # 같은 이름의 중복 행 제거 (첫 행 우선)
+  seen = {}
+  current = current.select do |r|
+    key = r[:name].to_s
+    next false if key.empty?
+    next false if seen[key]
+    seen[key] = true
+    true
+  end
 
   fallback = build_fallback_runner_state(runner_names, runner_sheet, default_pos)
 
@@ -317,7 +329,10 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   elsif BattleSkills.support?(action_type) || BattleSkills.defense?(action_type)
     # 자신 대상 스킬은 대상 생략 허용.
     target = username if target.empty? && skill[:range].to_s == '자신'
-    target_runner = target_runner_by_name(runner_state, target)
+
+    # 다중 대상(콤마 구분) 지원: 첫 대상 기준으로 검증
+    first_target = target.to_s.split(',').map { |t| normalize_target(t) }.reject(&:empty?).first.to_s
+    target_runner = target_runner_by_name(runner_state, first_target)
 
     # 행운부여/범위 좌표 지정류는 좌표를 허용.
     if skill[:kind] == :force_move
@@ -348,14 +363,14 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     return
   end
 
-  match = text.match(/\[(#{command_pattern}|이동)\/(.+?)\]/)
+  match = text.match(/\[(#{command_pattern}|이동)(?:\/(.+?))?\]/)
 
   unless match
     # 다중 태그, 안내문, 잡담처럼 전투 명령이 아닌 글은 조용히 무시합니다.
     # 단, 대괄호 명령처럼 보이는데 형식만 틀린 경우에만 안내합니다.
     if text.match?(/\[[^\]]+\]/)
       puts "[전투봇] 행동 형식 불일치: @#{username} -> #{text}"
-      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/보스이름], [스킬명/대상], [방어/아이디], [이동/좌표] 중 하나로 입력해주세요.')
+      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/보스이름], [스킬명/대상], [방어/아이디], [이동/좌표]  중 하나로 입력해주세요.')
     else
       puts "[전투봇] 비명령 메시지 무시: @#{username} -> #{text}"
     end
