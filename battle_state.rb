@@ -294,6 +294,10 @@ def skill_target_parts(raw)
   raw.to_s.split('/').map(&:strip).reject(&:empty?)
 end
 
+def targetless_attack_skill?(action_type)
+  ['폭발', '전체공격'].include?(action_type.to_s)
+end
+
 def validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, creature)
   runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
   actor = runner_state.find { |r| r[:name].to_s == username.to_s }
@@ -319,6 +323,10 @@ def validate_action(username, action_type, action_target, runner_names, view_she
 
   if BattleSkills.attack?(action_type)
     creature_name = creature[:name].to_s
+
+    # 대상 생략 공격 스킬은 현재 크리쳐를 대상으로 간주합니다.
+    target = creature_name if target.empty? && targetless_attack_skill?(action_type)
+
     unless ['크리쳐', creature_name].include?(target) || BattleGrid.valid_pos?(target)
       return [false, "대상을 찾을 수 없습니다. [#{action_type}/#{creature_name}] 형식으로 입력해주세요."]
     end
@@ -407,6 +415,10 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
       action_meta[:to] = coord
       puts "[전투봇] #{username} 이동 #{from_pos} → #{coord}"
     end
+  end
+
+  if BattleSkills.attack?(action_type) && action_target.to_s.strip.empty? && targetless_attack_skill?(action_type)
+    action_target = battle_creature[:name].to_s
   end
 
   battle_actions[username] = {
