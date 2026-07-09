@@ -25,11 +25,13 @@ require_relative 'battle_session'
 RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
 CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
 VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
+TRIGGER_SHEET_ID  = '1FIvnRTLlcDmx29TShi7XnX9uGYuEc-YC63B9b4Z1IHE'
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
 BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
 
 ROUND_WAIT_SECONDS = 60
 ACTION_WAIT_SECONDS = 300
+TRIGGER_CHECK_INTERVAL = 15
 
 LOCATION_MAP = {
   '스토디시' => 'E7',
@@ -43,6 +45,8 @@ runner_sheet   = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
 creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
 view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
 listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
+
+$trigger_sheet = SheetManager.new(TRIGGER_SHEET_ID, CREDENTIALS_PATH)
 
 puts '[전투봇] 초기화 완료 - 다중 전투 세션 모드'
 
@@ -80,7 +84,9 @@ def create_battle_session_from_status(status, content, mode, creature_sheet, bot
 end
 
 def post_session_thread(session, text)
-  response = post_battle_thread(text, session.dm_mode?, session.thread_reply_id)
+  # 실행 탭 B2 체크박스: 체크 = 퍼블릭, 해제 = DM
+  dm = ($trigger_sheet.read_visibility != 'public')
+  response = post_battle_thread(text, dm, session.thread_reply_id)
   session.mark_thread_id(response['id']) if response && response['id']
   response
 end
@@ -118,7 +124,7 @@ def announce_round(session, view_sheet)
 
   post_session_thread(session, announcement)
   session.announced = true
-  puts "[전투봇] 세션 #{session.id} #{session.round}라운드 안내 송출#{session.dm_mode? ? ' (DM)' : ''}"
+  puts "[전투봇] 세션 #{session.id} #{session.round}라운드 안내 송출"
 end
 
 def find_session_for_action(sessions, username, status = nil)
@@ -213,8 +219,34 @@ snapshot_current_dm_ids(processed_dm_ids)
 snapshot_current_notification_ids(processed_notification_ids)
 puts '[전투봇] 기존 툿/DM/멘션 스냅샷 완료 (재발동 방지)'
 
+bot_on = false
+last_trigger_check = Time.at(0)
+
 loop do
   begin
+    # 실행 탭 A2 체크박스 확인 (15초 간격, API 호출량 절약)
+    if (Time.now - last_trigger_check) >= TRIGGER_CHECK_INTERVAL
+      new_bot_on = $trigger_sheet.read_bot_on
+      last_trigger_check = Time.now
+
+      if new_bot_on && !bot_on
+        # 꺼짐 → 켜짐: 꺼져 있는 동안 쌓인 툿/DM/멘션 재발동 방지
+        fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
+        snapshot_current_dm_ids(processed_dm_ids)
+        snapshot_current_notification_ids(processed_notification_ids)
+        puts '[전투봇] 전투봇 켜짐 (실행 탭 A2 체크)'
+      elsif !new_bot_on && bot_on
+        puts '[전투봇] 전투봇 꺼짐 (실행 탭 A2 해제)'
+      end
+
+      bot_on = new_bot_on
+    end
+
+    unless bot_on
+      sleep(3)
+      next
+    end
+
     # 다음 라운드 자동 개시
     sessions.values.each do |session|
       next unless session.auto_next_round_timer
