@@ -118,7 +118,6 @@ def announce_round(session, view_sheet)
                  "#{attack_lines.join("\n")}\n" \
                  "[회복/아이디]\n" \
                  "[방어/아이디]\n" \
-                 "[이동/좌표]\n\n" \
                  "입력 대기: 5분\n" \
                  "───────────────────"
 
