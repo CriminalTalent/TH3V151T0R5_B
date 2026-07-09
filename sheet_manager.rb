@@ -16,9 +16,6 @@ class SheetManager
     )
   end
 
-  # ──────────────────────────────────────────────
-  # 기본 I/O
-  # ──────────────────────────────────────────────
   def read(range)
     @service.get_spreadsheet_values(@sheet_id, range).values || []
   rescue => e
@@ -54,40 +51,23 @@ class SheetManager
     false
   end
 
-  # ──────────────────────────────────────────────
-  # 실행 탭
-  # A2 = 전투봇 켜기/끄기 체크박스
-  # B2 = 퍼블릭/DM 체크박스 (체크 = 퍼블릭, 해제 = DM)
-  # ──────────────────────────────────────────────
   def read_bot_on
-    rows = read('실행!A2')
+    rows = read("'실행'!A2")
     return false if rows.empty? || rows[0].nil?
     truthy?(rows[0][0])
   end
 
   def read_visibility
-    rows = read('실행!B2')
+    rows = read("'실행'!B2")
     return 'direct' if rows.empty? || rows[0].nil? || rows[0][0].to_s.strip.empty?
     truthy?(rows[0][0]) ? 'public' : 'direct'
   end
 
-  # ──────────────────────────────────────────────
-  # 크리쳐 활성화 정보
-  # 보스 탭:
-  # A = 활성화 체크박스
-  # B = 크리쳐명
-  # C = 위치, 선택값
-  # ──────────────────────────────────────────────
   def read_creature_config
-    rows = read('보스!A2:C100')
+    rows = read("'보스'!A2:C100")
 
-    active = rows.find do |row|
-      truthy?(row[0]) && !row[1].to_s.strip.empty?
-    end
-
-    active ||= rows.find do |row|
-      !row[1].to_s.strip.empty?
-    end
+    active = rows.find { |row| truthy?(row[0]) && !row[1].to_s.strip.empty? }
+    active ||= rows.find { |row| !row[1].to_s.strip.empty? }
 
     return nil unless active
 
@@ -100,28 +80,8 @@ class SheetManager
     nil
   end
 
-  # ──────────────────────────────────────────────
-  # 스탯
-  #
-  # 러너/크리쳐 공용 대응.
-  #
-  # 권장 구조:
-  # A = ID 또는 크리쳐명
-  # B = 이름
-  # C = 기숙사
-  # D = 패시브선택
-  # E = 건강
-  # F = 내구도
-  # G = 마법능력
-  # H = 민첩
-  # I = 기술
-  # J = 행운
-  # K = 스킬1
-  # L = 스킬2
-  # M = 방향 또는 위치
-  # ──────────────────────────────────────────────
   def read_base_stats
-    rows = read('스탯!A2:M100')
+    rows = read("'스탯'!A2:M100")
 
     rows.map do |row|
       id = row[0].to_s.strip
@@ -157,7 +117,7 @@ class SheetManager
     creature_name = creature_name.to_s.strip
     return nil if creature_name.empty?
 
-    rows = read('스탯!A2:M100')
+    rows = read("'스탯'!A2:M100")
 
     row = rows.find do |r|
       r[0].to_s.strip == creature_name || r[1].to_s.strip == creature_name
@@ -168,7 +128,6 @@ class SheetManager
       return default_creature_stats(creature_name)
     end
 
-    # 일반 스탯 구조 대응
     hp = row[4].to_i
     hp = row[1].to_i if hp <= 0 && numeric?(row[1])
     hp = 200 if hp <= 0
@@ -205,21 +164,15 @@ class SheetManager
     }
   end
 
-  # ──────────────────────────────────────────────
-  # 러너 현황
-  #
-  # 현황 탭 권장 구조:
-  # A = ID
-  # B = 위치
-  # C = 현재체력
-  # D = 최대체력
-  # E = 상태
-  # F = 방향
-  # ──────────────────────────────────────────────
+  # 현황 탭:
+  # A ID
+  # B 위치
+  # C 현재체력
+  # D 최대체력
+  # E 상태
+  # F 방향
   def read_runner_state
-    rows = read('현황!A2:F100')
-    rows = read('러너현황!A2:F100') if rows.empty?
-    rows = read('맵현황!A2:F100') if rows.empty?
+    rows = read("'현황'!A2:F100")
 
     rows.map do |row|
       name = row[0].to_s.strip
@@ -256,20 +209,13 @@ class SheetManager
       ]
     end
 
-    return true if rows.empty?
-
-    # 남은 이전 행 제거를 위해 100행까지 빈 값으로 채워서 덮어씀
-    padded = rows + Array.new(100 - rows.size) { ['', '', '', '', '', ''] }
-
-    write("현황!A2:F101", padded)
+    padded = rows + Array.new([100 - rows.size, 0].max) { ['', '', '', '', '', ''] }
+    write("'현황'!A2:F101", padded)
   rescue => e
     puts "[update_runner_state 오류] #{e.message}"
     false
   end
 
-  # ──────────────────────────────────────────────
-  # 크리쳐 현황 출력용
-  # ──────────────────────────────────────────────
   def update_creature_state(creature)
     row = [[
       creature[:name],
@@ -284,17 +230,14 @@ class SheetManager
       creature[:status].to_s
     ]]
 
-    ok = write('크리쳐!A2:J2', row)
-    ok = write('전투상태!A2:J2', row) unless ok
+    ok = write("'크리쳐'!A2:J2", row)
+    ok = write("'전투상태'!A2:J2", row) unless ok
     ok
   rescue => e
     puts "[update_creature_state 오류] #{e.message}"
     false
   end
 
-  # ──────────────────────────────────────────────
-  # HP 바
-  # ──────────────────────────────────────────────
   def health_bar(hp, max_hp)
     hp = hp.to_i
     max_hp = max_hp.to_i
