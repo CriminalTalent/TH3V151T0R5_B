@@ -397,6 +397,12 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       end
     end
 
+    damage_power = (eff_atk.to_f * multiplier.to_f).ceil
+    damage_power *= 2 if crit
+    final_damage = BattleCalculator.calc_damage(damage_power, creature[:dur].to_i)
+    crit_damage_text = crit ? ' × 2' : ''
+    log << "실질 피해: #{eff_atk} × #{multiplier}#{crit_damage_text} - 내구도 #{creature[:dur].to_i} = #{final_damage}"
+
     apply_damage_to_creature(log, creature, name, skill_name, eff_atk, multiplier, creature[:dur].to_i, crit: crit, guaranteed: sure)
 
     case skill[:kind]
