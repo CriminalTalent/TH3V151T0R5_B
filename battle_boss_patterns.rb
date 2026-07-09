@@ -41,6 +41,11 @@ module BattleBossPatterns
     value > 0 ? value : 1.0
   end
 
+  def target_count(creature)
+    value = creature[:target_count].to_i
+    value > 0 ? value : 1
+  end
+
   def apply_ongoing_debuffs!(log, runner_state, ctx)
     ctx[:debuffs] ||= Hash.new { |h, k| h[k] = [] }
 
@@ -137,12 +142,26 @@ module BattleBossPatterns
 
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
     took_damage[name] = true if took_damage && dmg > 0
-    log << "#{name}에게 #{dmg} 피해"
+
+    log << "#{name}"
+    log << ''
+    log << "피해 계산"
+    log << "공격력 #{raw_power.to_i}"
+    log << "스킬 배율 ×1.0"
+    log << "= #{raw_power.to_i}"
+    log << ''
+    log << "내구도 #{eff_dur.to_i}"
+    log << ''
+    log << "실질 피해 #{dmg}"
+    log << ''
+    log << "#{name} HP"
+    log << "#{runner[:hp].to_i + dmg} → #{runner[:hp]}"
+
     apply_debuff!(log, ctx, name, debuff)
 
     if runner[:hp].to_i <= 0
-      runner[:status] = '사망'
-      log << "#{name} 전투불능"
+      runner[:status] = '전투불가'
+      log << "#{name} 전투불가"
     end
 
     dmg
@@ -158,16 +177,27 @@ module BattleBossPatterns
     log << ''
   end
 
+  def living_runners(runner_state)
+    runner_state.select { |runner| runner[:hp].to_i > 0 }
+  end
+
   def targets_by_cells(runner_state, cells)
-    runner_state.select do |runner|
-      runner[:hp].to_i > 0 && cells.include?(runner[:pos].to_s.upcase)
+    living_runners(runner_state).select do |runner|
+      cells.include?(runner[:pos].to_s.upcase)
     end
   end
 
   def targets_by_name(runner_state, target_name)
-    runner_state.select do |runner|
-      runner[:hp].to_i > 0 && runner[:name].to_s == target_name.to_s
+    target_names = target_name.to_s.split(',').map { |name| name.to_s.strip.gsub('@', '') }.reject(&:empty?)
+    return [] if target_names.empty?
+
+    living_runners(runner_state).select do |runner|
+      target_names.include?(runner[:name].to_s)
     end
+  end
+
+  def random_targets(runner_state, count = 1)
+    living_runners(runner_state).sample(count.to_i <= 0 ? 1 : count.to_i)
   end
 
   def apply_pattern!(log, runner_state, creature, ctx, stats_of: nil, dur_bonus: nil, defended_multiplier: nil, shields: nil, took_damage: nil)
@@ -185,8 +215,69 @@ module BattleBossPatterns
     # 현재스킬이 범위공격/전체공격/디버프가 아니더라도 보스스킬 탭의 분류/범위/대상으로 처리합니다.
     if name == '전체공격' || shape == '전체' || creature[:skill_range_default].to_s.strip == '전체'
       log_skill_header(log, creature, name, raw_power, '전체', debuff)
-      runner_state.each do |runner|
-        next unless runner[:hp].to_i > 0
+      targets = living_runners(runner_state)
+
+      if targets.empty?
+        log << '대상 없음'
+        log << '피해 없음'
+      else
+        targets.each do |runner|
+          apply_pattern_damage_to_runner!(
+            log, runner, creature, raw_power, debuff, ctx,
+            stats_of: stats_of,
+            dur_bonus: dur_bonus,
+            defended_multiplier: defended_multiplier,
+            shields: shields,
+            took_damage: took_damage
+          )
+        end
+      end
+
+      return true
+    end
+
+    if name == '디버프' || category == '디버프'
+      return false if cells.empty? && target_name.empty?
+      range_label = cells.empty? ? target_name : range_text(cells)
+      log_skill_header(log, creature, name, 0, range_label, debuff)
+      targets = cells.empty? ? targets_by_name(runner_state, target_name) : targets_by_cells(runner_state, cells)
+
+      if targets.empty?
+        log << '대상 없음'
+        log << '피해 없음'
+      else
+        targets.each { |runner| apply_debuff!(log, ctx, runner[:name], debuff) }
+      end
+
+      return true
+    end
+
+    # 공격 스킬: 스킬범위 좌표가 있으면 해당 칸, 스킬대상이 있으면 해당 러너.
+    # 둘 다 비어 있으면 기본 공격처럼 살아있는 러너 1명을 무작위 대상으로 삼습니다.
+    targets = []
+    range_label = ''
+
+    if cells.any?
+      targets = targets_by_cells(runner_state, cells)
+      range_label = range_text(cells)
+    elsif !target_name.empty?
+      targets = targets_by_name(runner_state, target_name)
+      range_label = target_name
+    elsif name == '지정공격다인'
+      targets = random_targets(runner_state, target_count(creature))
+      range_label = "랜덤 #{target_count(creature)}인"
+    else
+      targets = random_targets(runner_state, 1)
+      range_label = '랜덤 1인'
+    end
+
+    log_skill_header(log, creature, name, raw_power, range_label, debuff)
+
+    if targets.empty?
+      log << '대상 없음'
+      log << '피해 없음'
+    else
+      targets.each do |runner|
         apply_pattern_damage_to_runner!(
           log, runner, creature, raw_power, debuff, ctx,
           stats_of: stats_of,
@@ -196,41 +287,6 @@ module BattleBossPatterns
           took_damage: took_damage
         )
       end
-      return true
-    end
-
-    if name == '디버프' || category == '디버프'
-      return false if cells.empty? && target_name.empty?
-      range_label = cells.empty? ? target_name : range_text(cells)
-      log_skill_header(log, creature, name, 0, range_label, debuff)
-      targets = cells.empty? ? targets_by_name(runner_state, target_name) : targets_by_cells(runner_state, cells)
-      targets.each { |runner| apply_debuff!(log, ctx, runner[:name], debuff) }
-      return true
-    end
-
-    # 공격 스킬: 스킬범위 좌표가 있으면 해당 칸, 스킬대상이 있으면 해당 러너.
-    targets = []
-    range_label = ''
-    if cells.any?
-      targets = targets_by_cells(runner_state, cells)
-      range_label = range_text(cells)
-    elsif !target_name.empty?
-      targets = targets_by_name(runner_state, target_name)
-      range_label = target_name
-    else
-      return false
-    end
-
-    log_skill_header(log, creature, name, raw_power, range_label, debuff)
-    targets.each do |runner|
-      apply_pattern_damage_to_runner!(
-        log, runner, creature, raw_power, debuff, ctx,
-        stats_of: stats_of,
-        dur_bonus: dur_bonus,
-        defended_multiplier: defended_multiplier,
-        shields: shields,
-        took_damage: took_damage
-      )
     end
 
     true
