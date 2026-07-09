@@ -497,7 +497,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
             end
 
             if target[:hp] <= 0
-              target[:status] = '사망'
+              target[:status] = '전투불가'
               log << "#{tname} 쓰러짐..."
             end
           end
