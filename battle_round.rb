@@ -59,21 +59,50 @@ def cooldown_gate!(ctx, log, name, skill_name, skill)
 end
 
 def apply_damage_to_creature(log, creature, attacker_name, skill_name, atk_value, multiplier, dur, crit: false, guaranteed: false)
-  base = (atk_value.to_f * multiplier.to_f).ceil
-  base *= 2 if crit
-  dmg = BattleCalculator.calc_damage(base, dur.to_i)
-  creature[:hp] = [creature[:hp].to_i - dmg, 0].max
-  flags = []
-  flags << '필중' if guaranteed
-  flags << '크리티컬' if crit
-  suffix = flags.empty? ? '' : " (#{flags.join(', ')})"
-  log << "#{attacker_name}의 #{skill_name} → #{creature[:name]}에게 #{dmg} 피해#{suffix}"
+  before_hp = creature[:hp].to_i
+
+  scaled = (atk_value.to_f * multiplier.to_f).ceil
+  final_power = crit ? scaled * 2 : scaled
+  dmg = BattleCalculator.calc_damage(final_power, dur.to_i)
+
+  creature[:hp] = [before_hp - dmg, 0].max
+
+  log << "#{attacker_name}의 #{skill_name}"
+  log << ''
+  log << "피해 계산"
+  log << "공격력 #{atk_value.to_i}"
+  log << "스킬 배율 ×#{multiplier.to_f}"
+  log << "= #{scaled}"
+
+  if crit
+    log << ''
+    log << "크리티컬 ×2"
+    log << "= #{final_power}"
+  end
+
+  log << ''
+  log << "내구도 #{dur.to_i}"
+  log << ''
+  log << "실질 피해 #{dmg}"
+  log << ''
+  log << "#{creature[:name]} HP"
+  log << "#{before_hp} → #{creature[:hp]}"
+
   dmg
 end
 
 def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, view_sheet, creature, ctx)
   runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
   base_stats   = runner_sheet.read_base_stats
+  display_map  = base_stats.each_with_object({}) do |stat, h|
+    label = stat[:display_name].to_s.strip
+    h[stat[:name]] = label.empty? ? stat[:name] : label
+  end
+
+  runner_state.each do |runner|
+    runner[:display_name] = display_map[runner[:name]] || runner[:name]
+  end
+
   stats_of = ->(name) { base_stats.find { |s| s[:name] == name } || {} }
   state_of = ->(name) { runner_state.find { |r| r[:name] == name } }
 
@@ -99,6 +128,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   end
 
   passive_lines = []
+
   runner_names.each do |name|
     s  = stats_of.call(name)
     st = state_of.call(name)
@@ -117,6 +147,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         atk_bonus[name] += b
         passive_lines << "#{name}: [슬리데린] 이전 라운드 무피해 — 마법능력 +#{b}"
       end
+
       if s[:passive] == '2' && ctx[:slytherin_luck][name].to_i > 0
         luck_bonus[name] += ctx[:slytherin_luck][name]
         passive_lines << "#{name}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][name]}"
@@ -178,63 +209,75 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       target_names.each do |tname|
         t = state_of.call(tname)
         next unless t && t[:hp].to_i > 0
+
         heal = (s[:atk].to_i * skill[:ratio].to_f).ceil
         before = t[:hp].to_i
         t[:hp] = [before + heal, t[:max_hp].to_i].min
         healed << "#{tname} 건강 +#{t[:hp] - before}"
       end
       log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
+
     when :heal_area
       healed = []
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
+
         heal = (s[:atk].to_i * skill[:ratio].to_f).ceil
         before = r[:hp].to_i
         r[:hp] = [before + heal, r[:max_hp].to_i].min
         healed << "#{r[:name]} +#{r[:hp] - before}"
       end
       log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
+
     when :atk_buff_area
       amount = (s[:atk].to_i * skill[:ratio].to_f).ceil
       affected = []
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
+
         atk_bonus[r[:name]] += amount
         ctx[:buffs][r[:name]] << { stat: :atk, value: amount, turns: 1 }
         affected << r[:name]
       end
       log << "#{name}의 강화 → #{affected.join(', ')} 마법능력 +#{amount}" if affected.any?
+
     when :shield
       applied = []
       limit = skill[:max_targets] || target_names.size
       target_names.first(limit).each do |tname|
         t = state_of.call(tname)
         next unless t
+
         shields[tname] += skill[:value].to_i
         applied << tname
       end
       log << "#{name}의 보호 → #{applied.join(', ')} 보호막 +#{skill[:value]}" if applied.any?
+
     when :sure_hit
       applied = []
       target_names.each do |tname|
         t = state_of.call(tname)
         next unless t
+
         ctx[:sure_hit][tname] = true
         applied << tname
       end
       log << "#{name}의 백발백중 → #{applied.join(', ')}의 다음 공격 필중/크리티컬" if applied.any?
+
     when :luck_buff
       applied = []
       target_names.each do |tname|
         t = state_of.call(tname)
         next unless t
+
         luck_bonus[tname] += skill[:value].to_i
         ctx[:buffs][tname] << { stat: :luck, value: skill[:value].to_i, turns: skill[:turns].to_i }
         applied << tname
       end
       log << "#{name}의 응원 → #{applied.join(', ')} 행운 +#{skill[:value]} (#{skill[:turns]}턴)" if applied.any?
+
     when :cooldown_reset
       skill_to_reset = parts[1].to_s.strip
       if skill_to_reset.empty?
@@ -244,15 +287,18 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         target_names.each do |tname|
           t = state_of.call(tname)
           next unless t
+
           ctx[:cooldowns][tname].delete(skill_to_reset)
           applied << tname
         end
+
         if applied.any?
           log << "#{name}의 즉발 → #{applied.join(', ')}의 [#{skill_to_reset}] 쿨타임 초기화"
         else
           log << "#{name}의 즉발 → 대상 없음 (무효)"
         end
       end
+
     when :force_move
       coord = parts[1].to_s.upcase
       if target && BattleGrid.valid_pos?(coord)
@@ -297,34 +343,42 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       dur_bonus[target_name] += (stats_of.call(target_name)[:dur].to_i * 0.5).ceil
       defended_multiplier[target_name] *= skill[:ratio].to_f
       log << "#{name}의 방어 → #{target_name} 내구도 1.5배"
+
     when :agi_buff_self
       agi_bonus[name] += skill[:value].to_i
       log << "#{name}의 회피 → 민첩 +#{skill[:value]}"
+
     when :revenge
       ctx[:revenge][target_name] = { by: name, multiplier: skill[:multiplier] }
       log << "#{name}의 복수 → #{target_name} 피격 시 반격 대기"
+
     when :cover
       ctx[:cover][target_name] = name if target
       log << "#{name}의 희생 → #{target_name} 대신 피격 대기" if target
+
     when :dur_buff_area
       amount = (s[:dur].to_i * skill[:ratio].to_f).ceil
       affected = []
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
+
         dur_bonus[r[:name]] += amount
         affected << r[:name]
       end
       log << "#{name}의 철벽 → #{affected.join(', ')} 내구도 +#{amount}" if affected.any?
+
     when :agi_buff_area
       affected = []
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
+
         agi_bonus[r[:name]] += skill[:value].to_i
         affected << r[:name]
       end
       log << "#{name}의 주의분산 → #{affected.join(', ')} 민첩 +#{skill[:value]}" if affected.any?
+
     when :survive_once
       ctx[:survive_once][name] = true
       log << "#{name}의 필사즉생 → 이번 턴 건강 0 이하 방지"
@@ -353,29 +407,51 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     next unless cooldown_gate!(ctx, log, name, skill_name, skill)
 
     sure = ctx[:sure_hit].delete(name)
-    hit_detail = BattleCalculator.hit_detail(s[:tec].to_i + tec_bonus[name])
-    hit_ok = sure || skill[:kind] == :sacrifice_attack || hit_detail[:success]
-    unless hit_ok
-      log << "#{name}의 #{skill_name} → 빗나감!"
-      next
-    end
+    sacrifice_attack = skill[:kind] == :sacrifice_attack
 
-    unless sure || skill[:kind] == :sacrifice_attack
-      if BattleCalculator.evade?(creature[:agi].to_i)
-        log << "#{name}의 #{skill_name} → #{creature[:name]} 회피!"
+    hit_detail = nil
+    evade_detail = nil
+    crit_detail = nil
+
+    log << "판정 결과"
+
+    if sure || sacrifice_attack
+      log << "명중: 자동 명중"
+    else
+      hit_detail = BattleCalculator.hit_detail(s[:tec].to_i + tec_bonus[name])
+      log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
+
+      unless hit_detail[:success]
+        log << "#{name}의 #{skill_name} → 공격 실패"
         next
       end
     end
 
-    crit_detail = BattleCalculator.critical_detail(s[:luck].to_i + luck_bonus[name])
-    crit = sure || crit_detail[:success]
+    unless sure || sacrifice_attack
+      evade_detail = BattleCalculator.evade_detail(creature[:agi].to_i)
+      if evade_detail && evade_detail[:roll]
+        log << "회피 #{evade_detail[:rate]}% → #{evade_detail[:roll]} (#{evade_detail[:success] ? '회피' : '피격'})"
+      end
 
-    unless sure || skill[:kind] == :sacrifice_attack
-      log << "판정 결과"
-      log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '실패'})"
-      log << "크리티컬 #{crit_detail[:rate]}% → #{crit_detail[:roll]} (#{crit_detail[:success] ? '크리티컬' : '일반'})"
-      log << ""
+      if evade_detail && evade_detail[:success]
+        log << "#{creature[:name]} 회피 — 피해 없음"
+        next
+      end
     end
+
+    if sure
+      crit = true
+      log << "크리티컬: 자동 크리티컬"
+    else
+      crit_detail = BattleCalculator.critical_detail(s[:luck].to_i + luck_bonus[name])
+      crit = crit_detail[:success]
+      if crit_detail[:roll]
+        log << "크리티컬 #{crit_detail[:rate]}% → #{crit_detail[:roll]} (#{crit ? '크리티컬' : '일반'})"
+      else
+        log << "크리티컬 #{crit_detail[:rate]}% → 판정 없음 (일반)"
+      end
+    end
+
     eff_atk = s[:atk].to_i + atk_bonus[name]
     multiplier = skill[:multiplier] || 1.0
 
@@ -384,32 +460,50 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       cost = parts[1].to_i
       cost = 10 if cost <= 0
       cost = [cost, actor[:hp].to_i - 1].min
+
+      before_hp = actor[:hp].to_i
       actor[:hp] -= cost
-      eff_atk += (cost / 10) * 5
-      log << "#{name}의 고육지책 → 건강 #{cost} 소모, 마법능력 +#{(cost / 10) * 5}"
+
+      bonus = (cost / 10) * 5
+      eff_atk += bonus
+
+      log << "#{name}의 고육지책"
+      log << "#{name} 건강 #{before_hp} → #{actor[:hp]} (소모 #{cost})"
+      log << "마법능력 +#{bonus}"
+
     elsif skill[:kind] == :rush
       parts = skill_parts(act[:target])
       dest = parts[1].to_s.upcase
       if BattleGrid.valid_pos?(dest)
         dist = BattleGrid.distance(actor[:pos], dest).to_i
         multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
-        actor[:pos] = dest if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
+        if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
+          old_pos = actor[:pos]
+          actor[:pos] = dest
+          log << "#{name}의 습격 이동 #{old_pos} → #{dest}"
+        end
       end
     end
 
-    damage_power = (eff_atk.to_f * multiplier.to_f).ceil
-    damage_power *= 2 if crit
-    final_damage = BattleCalculator.calc_damage(damage_power, creature[:dur].to_i)
-    crit_damage_text = crit ? ' × 2' : ''
-    log << "실질 피해: #{eff_atk} × #{multiplier}#{crit_damage_text} - 내구도 #{creature[:dur].to_i} = #{final_damage}"
-
-    apply_damage_to_creature(log, creature, name, skill_name, eff_atk, multiplier, creature[:dur].to_i, crit: crit, guaranteed: sure)
+    apply_damage_to_creature(
+      log,
+      creature,
+      name,
+      skill_name,
+      eff_atk,
+      multiplier,
+      creature[:dur].to_i,
+      crit: crit,
+      guaranteed: sure
+    )
 
     case skill[:kind]
     when :attack_debuff
       down = (creature[:atk].to_i * 0.2).ceil
-      creature[:atk] = [creature[:atk].to_i - down, 0].max
-      log << "#{creature[:name]}의 마법능력 -#{down}"
+      before_atk = creature[:atk].to_i
+      creature[:atk] = [before_atk - down, 0].max
+      log << "#{creature[:name]} 마법능력 #{before_atk} → #{creature[:atk]}"
+
     when :confusion
       ctx[:confusion][creature[:name]] += 1
       log << "#{creature[:name]} 혼란 #{ctx[:confusion][creature[:name]]}/5중첩"
@@ -487,6 +581,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
             target[:hp] = [target[:hp].to_i - dmg, 0].max
             took_damage[tname] = true if dmg > 0
+
             line = "#{creature[:name]}의 반격 → #{tname}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
             line += " (#{original_target[:name]} 대신 피격)" if original_target != target
             log << line
@@ -504,7 +599,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
             if target[:hp] <= 0
               target[:status] = '전투불가'
-              log << "#{tname} 쓰러짐..."
+              log << "#{tname} 전투불가"
             end
           end
         end
@@ -525,12 +620,25 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
   ctx[:prev_took_damage] = took_damage
   battle_actions.each { |name, act| ctx[:prev_action][name] = act[:type] }
+
   cleanup_buffs!(ctx)
   advance_cooldowns!(ctx)
+
   ctx[:cover] = {}
   ctx[:revenge] = {}
   ctx[:sure_hit] = {}
   ctx[:survive_once] = {}
+
+  if defined?(display_map) && display_map
+    log.map! do |line|
+      text = line.to_s
+      display_map.each do |id, label|
+        next if id.to_s.empty? || label.to_s.empty? || id == label
+        text = text.gsub(/\b#{Regexp.escape(id)}\b/, label)
+      end
+      text
+    end
+  end
 
   view_sheet.update_runner_state(runner_state)
   [log, runner_state]
@@ -560,57 +668,90 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
 
   title = timeout ? "[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)" : "[#{battle_round}라운드] #{creature_name} 전투 결과"
 
-  result = "#{runner_tags}\n\n#{title}\n\n"
-  result += "────────────────────\n"
-  result += "행동\n"
+  # 1툿: 행동 + 전장
+  part1 = "#{runner_tags}
+
+#{title}
+
+"
+  part1 += "────────────────────
+"
+  part1 += "행동
+"
+
   runner_names.each do |name|
-    result += "#{action_text_for_result(name, battle_actions[name], creature_name)}\n"
+    part1 += "#{action_text_for_result(name, battle_actions[name], creature_name)}
+"
   end
 
   moved = battle_actions.select { |_name, act| act && act[:type].to_s == '이동' && !act[:from].to_s.empty? }
   if moved.any?
-    result += "\n이동\n"
+    part1 += "
+이동
+"
     moved.each do |name, act|
-      result += "#{name}: #{act[:from]} → #{act[:to]}\n"
+      part1 += "#{name}: #{act[:from]} → #{act[:to]}
+"
     end
   end
 
-  result += "────────────────────\n"
-  result += "전장\n\n"
-  BattleGrid.render(runner_state, creature).each { |line| result += "#{line}\n" }
+  part1 += "────────────────────
+"
+  part1 += "전장
 
-  result += "────────────────────\n"
-  result += "전투 로그\n"
+"
+  BattleGrid.render(runner_state, creature).each { |line| part1 += "#{line}
+" }
+
+  # 2툿: 전투 로그 + 상태
+  part2 = "#{title} - 결과
+
+"
+  part2 += "전투 로그
+"
+
   log.each do |line|
     pretty = line.to_s
     if pretty.include?('→')
-      result += "▶ #{pretty}\n"
+      part2 += "▶ #{pretty}
+"
     else
-      result += "#{pretty}\n"
+      part2 += "#{pretty}
+"
     end
   end
 
-  result += "────────────────────\n"
-  result += "상태\n"
+  part2 += "────────────────────
+"
+  part2 += "상태
+"
+
   runner_state.select { |r| runner_names.include?(r[:name]) }.each do |r|
     status_text = r[:status].to_s.strip
     status_text = " / #{status_text}" unless status_text.empty?
-    result += "#{r[:name]}\n"
-    result += "#{view_sheet.health_bar(r[:hp], r[:max_hp])} / 위치 #{r[:pos]}#{status_text}\n\n"
+    part2 += "#{r[:name]}
+"
+    part2 += "#{view_sheet.health_bar(r[:hp], r[:max_hp])} / 위치 #{r[:pos]}#{status_text}
+
+"
   end
 
-  result += "#{creature_name}\n"
-  result += "#{view_sheet.health_bar(creature_hp, creature_max_hp)}\n"
-  result += "점유칸: #{BattleGrid.creature_cells(creature).join(' · ')}\n"
-  result += "\n"
+  part2 += "#{creature_name}
+"
+  part2 += "#{view_sheet.health_bar(creature_hp, creature_max_hp)}
+"
+  part2 += "점유칸: #{BattleGrid.creature_cells(creature).join(' · ')}
+"
+  part2 += "
+"
 
   if creature_hp <= 0
-    result += "#{creature_name} 격파! 전투 승리!"
+    part2 += "#{creature_name} 격파! 전투 승리!"
   elsif runner_state.none? { |r| runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
-    result += "전원 전투 불능. 전투 패배."
+    part2 += "전원 전투 불능. 전투 패배."
   else
-    result += "#{ROUND_WAIT_SECONDS}초 후 다음 라운드가 시작됩니다."
+    part2 += "#{ROUND_WAIT_SECONDS}초 후 다음 라운드가 시작됩니다."
   end
 
-  result
+  [part1, part2]
 end
