@@ -258,7 +258,10 @@ class SheetManager
 
     return true if rows.empty?
 
-    write("현황!A2:F#{rows.size + 1}", rows)
+    # 남은 이전 행 제거를 위해 100행까지 빈 값으로 채워서 덮어씀
+    padded = rows + Array.new(100 - rows.size) { ['', '', '', '', '', ''] }
+
+    write("현황!A2:F101", padded)
   rescue => e
     puts "[update_runner_state 오류] #{e.message}"
     false
