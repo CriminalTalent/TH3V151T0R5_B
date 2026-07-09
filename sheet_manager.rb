@@ -16,6 +16,10 @@ class SheetManager
     )
   end
 
+  # ──────────────────────────────────────────────
+  # 기본 I/O
+  # ──────────────────────────────────────────────
+
   def read(range)
     @service.get_spreadsheet_values(@sheet_id, range).values || []
   rescue => e
@@ -51,6 +55,12 @@ class SheetManager
     false
   end
 
+  # ──────────────────────────────────────────────
+  # 실행 탭
+  # A2 = 전투봇 켜기/끄기 체크박스
+  # B2 = 퍼블릭/DM 체크박스
+  # ──────────────────────────────────────────────
+
   def read_bot_on
     rows = read("'실행'!A2")
     return false if rows.empty? || rows[0].nil?
@@ -62,6 +72,10 @@ class SheetManager
     return 'direct' if rows.empty? || rows[0].nil? || rows[0][0].to_s.strip.empty?
     truthy?(rows[0][0]) ? 'public' : 'direct'
   end
+
+  # ──────────────────────────────────────────────
+  # 크리쳐 활성화 정보
+  # ──────────────────────────────────────────────
 
   def read_creature_config
     rows = read("'보스'!A2:C100")
@@ -79,6 +93,28 @@ class SheetManager
     puts "[read_creature_config 오류] #{e.message}"
     nil
   end
+
+  # ──────────────────────────────────────────────
+  # 러너 스탯
+  #
+  # 자동봇 시트 / 스탯 탭 구조:
+  # A ID
+  # B 이름
+  # C 기숙사
+  # D 패시브선택
+  # E 건강
+  # F 내구도
+  # G 마법능력
+  # H 민첩
+  # I 기술
+  # J 행운
+  # K 스킬1
+  # L 스킬2
+  # M facing
+  #
+  # E열 건강은 전투 중 현재 체력으로 갱신합니다.
+  # 최대체력은 전투 세션 시작 시 읽은 건강값을 battle_round.rb의 ctx에 보존합니다.
+  # ──────────────────────────────────────────────
 
   def read_base_stats
     rows = read("'스탯'!A2:M100")
@@ -164,57 +200,57 @@ class SheetManager
     }
   end
 
-  # 현황 탭:
-  # A ID
-  # B 위치
-  # C 현재체력
-  # D 최대체력
-  # E 상태
-  # F 방향
+  # ──────────────────────────────────────────────
+  # 러너 상태
+  #
+  # 더 이상 현황/러너현황/맵현황 탭을 쓰지 않습니다.
+  # 자동봇 시트 스탯 탭의 E열 건강을 현재 체력으로 읽고/씁니다.
+  # 위치는 별도 위치봇/현황 탭이 없으면 기본 D3으로 시작합니다.
+  # ──────────────────────────────────────────────
+
   def read_runner_state
-    rows = read("'현황'!A2:F100")
-
-    rows.map do |row|
-      name = row[0].to_s.strip
-      next if name.empty?
-
-      hp = row[2].to_i
-      max_hp = row[3].to_i
-      max_hp = hp if max_hp <= 0
-      hp = max_hp if hp <= 0 && max_hp > 0
-
+    read_base_stats.map do |stat|
       {
-        name:    name,
-        pos:     row[1].to_s.strip,
-        hp:      hp,
-        max_hp:  max_hp,
-        status:  row[4].to_s.strip,
-        facing:  row[5].to_s.strip.empty? ? '하' : row[5].to_s.strip
+        name:    stat[:name],
+        pos:     'D3',
+        hp:      stat[:hp].to_i,
+        max_hp:  stat[:max_hp].to_i,
+        status:  '',
+        facing:  stat[:facing].to_s.strip.empty? ? '하' : stat[:facing]
       }
-    end.compact
+    end
   rescue => e
     puts "[read_runner_state 오류] #{e.message}"
     []
   end
 
   def update_runner_state(states)
-    rows = states.map do |s|
-      [
-        s[:name],
-        s[:pos],
-        s[:hp],
-        s[:max_hp],
-        s[:status].to_s,
-        s[:facing].to_s.empty? ? '하' : s[:facing]
-      ]
+    rows = read("'스탯'!A2:M100")
+    return true if rows.empty?
+
+    hp_by_id = states.to_a.each_with_object({}) do |state, h|
+      id = state[:name].to_s.strip
+      h[id] = state[:hp].to_i unless id.empty?
     end
 
-    padded = rows + Array.new([100 - rows.size, 0].max) { ['', '', '', '', '', ''] }
-    write("'현황'!A2:F101", padded)
+    values = rows.map do |row|
+      id = row[0].to_s.strip
+      if hp_by_id.key?(id)
+        [hp_by_id[id]]
+      else
+        [row[4]]
+      end
+    end
+
+    write("'스탯'!E2:E#{rows.size + 1}", values)
   rescue => e
     puts "[update_runner_state 오류] #{e.message}"
     false
   end
+
+  # ──────────────────────────────────────────────
+  # 크리쳐 현황 출력용
+  # ──────────────────────────────────────────────
 
   def update_creature_state(creature)
     row = [[
@@ -237,6 +273,10 @@ class SheetManager
     puts "[update_creature_state 오류] #{e.message}"
     false
   end
+
+  # ──────────────────────────────────────────────
+  # HP 바
+  # ──────────────────────────────────────────────
 
   def health_bar(hp, max_hp)
     hp = hp.to_i
