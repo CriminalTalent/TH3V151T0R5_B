@@ -78,19 +78,7 @@ class SheetManager
   # ──────────────────────────────────────────────
 
   def read_creature_config
-    rows = read("'보스'!A2:C100")
-
-    active = rows.find { |row| truthy?(row[0]) && !row[1].to_s.strip.empty? }
-    active ||= rows.find { |row| !row[1].to_s.strip.empty? }
-
-    return nil unless active
-
-    {
-      name: active[1].to_s.strip,
-      pos:  active[2].to_s.strip
-    }
-  rescue => e
-    puts "[read_creature_config 오류] #{e.message}"
+    # 보스 탭은 사용하지 않습니다. 크리쳐는 스탯 탭의 활성 행으로만 결정합니다.
     nil
   end
 
