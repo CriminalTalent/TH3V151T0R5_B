@@ -175,12 +175,18 @@ def current_creature(creature_sheet)
 end
 
 def creature_from_start_content(content, creature_sheet)
-  name = content.to_s.match(/크리쳐\s*[「『](.+?)[」』]\s*출현/)&.[](1)
+  # [전투시작/크리쳐명] 또는 [전투시작/크리쳐명/위치] 형식 우선 파싱
+  slash_match = content.to_s.match(/\[전투시작\/([^\/\]]+?)(?:\/([A-G][1-8]))?\]/i)
+  name       = slash_match&.[](1)
+  inline_pos = slash_match&.[](2)
+
+  name = content.to_s.match(/크리쳐\s*[「『](.+?)[」』]\s*출현/)&.[](1) if name.to_s.strip.empty?
   name = content.to_s.match(/상대[:：]\s*([^\n]+)/)&.[](1) if name.to_s.strip.empty?
   name = name.to_s.strip
 
-  pos = content.to_s.match(/위치[:：]\s*([A-G][1-8])/i)&.[](1)
-  pos = content.to_s.match(/@\s*([A-G][1-8])/i)&.[](1) if pos.to_s.strip.empty?
+  pos = inline_pos.to_s.strip
+  pos = content.to_s.match(/위치[:：]\s*([A-G][1-8])/i)&.[](1).to_s if pos.empty?
+  pos = content.to_s.match(/@\s*([A-G][1-8])/i)&.[](1).to_s if pos.strip.empty?
   pos = pos.to_s.strip.upcase
 
   size = content.to_s.match(/크기[:=：]\s*(\d+\s*x\s*\d+)/i)&.[](1).to_s.strip.downcase
