@@ -1,0 +1,14 @@
+battle_api.rb의 첫 줄을 다음과 같이 변경:
+
+현재:
+require 'json'
+require 'net/http'
+require 'uri'
+require_relative 'toot_builder'
+
+변경:
+require 'json'
+require 'net/http'
+require 'uri'
+require_relative 'toot_builder'
+require_relative 'mastodon_client'

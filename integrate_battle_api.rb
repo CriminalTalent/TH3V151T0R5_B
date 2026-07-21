@@ -1,65 +1,26 @@
+# main.rb의 모든 require 다음에 battle_api.rb 내용 추가
+# 약 1070줄 이후에 다음을 추가:
+
 require 'json'
-require_relative 'mastodon_client'
 require 'net/http'
 require 'uri'
-require_relative 'toot_builder'
-
-def mastodon_client
-  @mastodon_client ||= MastodonClient.new(
-    base_url: ENV['MASTODON_BASE_URL'],
-    token: ENV['BATTLE_TOKEN']
-  )
-end
-
-def post_battle_thread(text, dm = false, reply_to_id = nil, runner_tags = '')
-  visibility = dm ? 'direct' : 'public'
-  parts = text.split("\n---SPLIT---\n")
-  
-  thread_ids = []
-  parent_id = reply_to_id
-  
-  parts.each_with_index do |part, idx|
-    toot_text = part
-    if idx > 0 && !runner_tags.empty?
-      toot_text = "#{runner_tags}\n\n#{part}"
-    end
-    
-    response = mastodon_client.post_status(
-      toot_text,
-      reply_to_id: parent_id,
-      visibility: visibility
-    )
-    
-    if response && response['id']
-      thread_ids << response['id']
-      parent_id = response['id']
-    else
-      return nil
-    end
-  end
-  
-  thread_ids.length > 0 ? { 'id' => thread_ids.last, 'all_ids' => thread_ids } : nil
-rescue => e
-  puts "[post_battle_thread 오류] #{e.class}: #{e.message}"
-  nil
-end
 
 def fetch_public_statuses
-  mastodon_client.fetch_public_statuses
+  listener.fetch_public_statuses
 rescue => e
   puts "[fetch_public_statuses 오류] #{e.class}: #{e.message}"
   []
 end
 
 def fetch_conversations
-  mastodon_client.fetch_conversations
+  listener.fetch_conversations
 rescue => e
   puts "[fetch_conversations 오류] #{e.class}: #{e.message}"
   []
 end
 
 def fetch_notifications
-  mastodon_client.fetch_notifications
+  listener.fetch_notifications
 rescue => e
   puts "[fetch_notifications 오류] #{e.class}: #{e.message}"
   []
@@ -111,7 +72,6 @@ def apply_boss_skill_definition!(creature, creature_sheet)
     rows = creature_sheet.read_range('보스스킬', 'A:Z')
     return if rows.empty?
     
-    header_row = rows[0]
     target_row = rows.find { |row| row[0].to_s.strip == creature[:current_skill].to_s.strip }
     return unless target_row
     
@@ -245,48 +205,4 @@ def build_result_text(runner_tags, round, creature, actions, runner_names, log, 
   text += log.join("\n") if log.is_a?(Array)
   text += "\n\n현재 상태: #{view_sheet.health_bar(creature[:hp], creature[:max_hp])}" if view_sheet
   [text]
-end
-
-def select_auto_skill(creature, creature_sheet)
-  return nil unless creature
-  
-  begin
-    rows = creature_sheet.read_range('보스스킬', 'A:Z')
-    return nil if rows.empty?
-    
-    available = []
-    header_row = rows[0]
-    
-    rows[1..].each do |row|
-      skill_name = row[0].to_s.strip
-      next if skill_name.empty?
-      
-      category = row[5].to_s.strip
-      priority = row[6].to_i
-      
-      available << {
-        name: skill_name,
-        category: category,
-        priority: priority
-      }
-    end
-    
-    return nil if available.empty?
-    
-    priority_map = {
-      '필수' => 1,
-      '생존' => 2,
-      '범위' => 3,
-      '단일' => 4,
-      '기본공격' => 5
-    }
-    
-    available.sort_by do |skill|
-      cat_priority = priority_map[skill[:category]] || 99
-      [cat_priority, -skill[:priority]]
-    end.first[:name]
-  rescue => e
-    puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
-    nil
-  end
 end

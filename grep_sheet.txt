@@ -1,0 +1,74 @@
+./sheet_manager.rb:77:  # 실행 탭
+./sheet_manager.rb:78:  # A2 = 전투봇 켜기/끄기 체크박스
+./sheet_manager.rb:83:    rows = read("'실행'!A2")
+./sheet_manager.rb:90:    rows = @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values || []
+./sheet_manager.rb:94:    puts "[시트 읽기 오류] '실행'!A2: #{e.message} (이전 상태 유지)"
+./sheet_manager.rb:99:    rows = read("'실행'!B2")
+./sheet_manager.rb:136:    rows = read("'스탯'!A2:M100")
+./sheet_manager.rb:173:    rows = read("'스탯'!A2:M100")
+./sheet_manager.rb:245:    rows = read("'스탯'!A2:M100")
+./sheet_manager.rb:288:    write("'현황'!A2:J2", row)
+./main.rb:90:  # 실행 탭 B2 체크박스: 체크 = 퍼블릭, 해제 = DM
+./main.rb:566:    # 실행 탭 A2 체크박스 확인 (15초 간격, API 호출량 절약)
+./main.rb:577:        puts '[전투봇] 전투봇 켜짐 (실행 탭 A2 체크)'
+./main.rb:579:        puts '[전투봇] 전투봇 꺼짐 (실행 탭 A2 해제)'
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwa/ecdsa.rb:35:          digest: 'sha256'
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwa/ecdsa.rb:39:          digest: 'sha256'
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwa/ecdsa.rb:51:          digest: 'sha256'
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwa/hmac.rb:30:      register_algorithm(new('HS256', OpenSSL::Digest::SHA256))
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwk/rsa.rb:64:        OpenSSL::Digest::SHA256.hexdigest(sequence.to_der)
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwk/thumbprint.rb:15:          Digest::SHA256.digest(
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwk/hmac.rb:61:        OpenSSL::Digest::SHA256.hexdigest(sequence.to_der)
+./vendor/bundle/ruby/3.0.0/gems/jwt-2.10.3/lib/jwt/jwk/ec.rb:65:        OpenSSL::Digest::SHA256.hexdigest(sequence.to_der)
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/service.rb:483:        #   data is: `A1=1,B1=2,A2=3,B2=4`, then requesting `ranges=["A1:B2"],
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/service.rb:678:        #   data in Sheet1 is: `A1=1,B1=2,A2=3,B2=4`, then requesting `range=Sheet1!A1:B2?
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/classes.rb:1639:        # data is: `A1=1,B1=2,A2=3,B2=4`, then a request that selects that range and
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/classes.rb:8045:      # formula `=A1` into range B2:C4, B2 would be `=A1`, B3 would be `=A2`, B4 would
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/classes.rb:8362:        # formula `=A1` into range B2:C4, B2 would be `=A1`, B3 would be `=A2`, B4 would
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/classes.rb:11482:        # 1,B1=2,A2=3,B2=4`, then requesting `range=A1:B2,majorDimension=ROWS` will
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/classes.rb:11485:        # then `[[1,2],[3,4]]` will set `A1=1,B1=2,A2=3,B2=4`. With `range=A1:B2,
+./vendor/bundle/ruby/3.0.0/gems/google-apis-sheets_v4-0.41.0/lib/google/apis/sheets_v4/classes.rb:11486:        # majorDimension=COLUMNS` then `[[1,2],[3,4]]` will set `A1=1,B1=3,A2=2,B2=4`.
+./vendor/bundle/ruby/3.0.0/gems/faraday-2.14.2/spec/faraday/request/url_encoded_spec.rb:66:      expect(response.body).to eq('str=e%C3%A9+c%C3%A7+a%C3%A3+a%C3%A2')
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/base_client.rb:37:          hash = Digest::SHA256.hexdigest token
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/base_client.rb:38:          Google::Logging::Message.from message: "Sending auth token. (sha256:#{hash})"
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/user_authorizer.rb:346:        digest = Digest::SHA256.digest code_verifier
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/api_key.rb:137:          hash = Digest::SHA256.hexdigest @api_key
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/api_key.rb:138:          Google::Logging::Message.from message: "Sending API key auth token. (sha256:#{hash})"
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:316:          content_sha256 = sha256_hexdigest request_payload
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:318:          canonical_req = canonical_request original_request[:method], uri, headers, content_sha256
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:348:            "AWS4-HMAC-SHA256",
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:365:          OpenSSL::HMAC.digest OpenSSL::Digest.new("sha256"), key, value
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:369:          OpenSSL::HMAC.hexdigest OpenSSL::Digest.new("sha256"), key, value
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:387:            "AWS4-HMAC-SHA256",
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:390:            sha256_hexdigest(canonical_request)
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:403:        def canonical_request http_method, uri, headers, content_sha256
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:412:            content_sha256
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:416:        def sha256_hexdigest string
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/aws_credentials.rb:417:          OpenSSL::Digest::SHA256.hexdigest string
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/base_credentials.rb:173:            digest = Digest::SHA256.hexdigest token_request[:subject_token].to_s
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/base_credentials.rb:174:            loggable_request = token_request.merge subject_token: "(sha256:#{digest})"
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/base_credentials.rb:210:            digest = Digest::SHA256.hexdigest original_token
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/external_account/base_credentials.rb:212:              message: "Requesting impersonated access token with original token (sha256:#{digest})",
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/service_account_jwt_header.rb:115:          hash = Digest::SHA256.hexdigest jwt_token
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/service_account_jwt_header.rb:116:          Google::Logging::Message.from message: "Sending JWT auth token. (sha256:#{hash})"
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/signet.rb:206:          digest = Digest::SHA256.hexdigest response_hash["access_token"]
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/signet.rb:207:          response_hash["access_token"] = "(sha256:#{digest})"
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/signet.rb:210:          digest = Digest::SHA256.hexdigest response_hash["id_token"]
+./vendor/bundle/ruby/3.0.0/gems/googleauth-1.17.0/lib/googleauth/signet.rb:211:          response_hash["id_token"] = "(sha256:#{digest})"
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/sample/generate_test_keys.rb:20:  root_ca.sign(root_key, OpenSSL::Digest::SHA256.new)
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/sample/generate_test_keys.rb:50:  cert.sign(root_key, OpenSSL::Digest::SHA256.new)
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/sample/generate_test_keys.rb:93:  cert.sign(key, OpenSSL::Digest::SHA256.new)
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_auth.rb:368:    ha2 = md5.hexdigest("GET:/")
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_auth.rb:369:    response = md5.hexdigest("#{ha1}:nonce:#{ha2}")
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_auth.rb:399:    ha2 = md5.hexdigest("GET:/")
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_auth.rb:400:    response = md5.hexdigest("#{ha1}:nonce:#{ha2}")
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_auth.rb:415:    ha2 = md5.hexdigest("GET:/")
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_auth.rb:416:    response = md5.hexdigest("#{ha1}:nonce:#{ha2}")
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/jruby_ssl_socket/test_pemutils.rb:8:    @raw_cert = "-----BEGIN CERTIFICATE-----\nMIIDOTCCAiGgAwIBAgIBAjANBgkqhkiG9w0BAQsFADBCMRMwEQYKCZImiZPyLGQB\nGRYDb3JnMRkwFwYKCZImiZPyLGQBGRYJcnVieS1sYW5nMRAwDgYDVQQDDAdSdWJ5\nIENBMB4XDTE2MDgxMDE3MjEzNFoXDTE3MDgxMDE3MjEzNFowSzETMBEGCgmSJomT\n8ixkARkWA29yZzEZMBcGCgmSJomT8ixkARkWCXJ1YnktbGFuZzEZMBcGA1UEAwwQ\nUnVieSBjZXJ0aWZpY2F0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB\nAJCfsSXpSMpmZCVa+ZCM+QDgomnhDlvnrGDq6pasTaIspGTXgws+7r8Dt/cNe6EH\nHJpRH2cGRiO4yPcfcT9eS4X7k8OC4f33wHfACOmLu6LeoNE8ujmSk6L6WzLUI+sE\nnLZbFrXxoAo4XHsm8vEG9C+jEoXZ1p+47wrAGaDwDQTnzlMy4dT9pRQEJP2G/Rry\nUkuZn8SUWmh3/YS78iaSzsNF1cgE1ealHOrPPFDjiCGDaH/LHyUPYlbFSLZ/B7Qx\nLxi5sePLcywWq/EJrmWpgeVTDjtNijsdKv/A3qkY+fm/oD0pzt7XsfJaP9YKNyJO\nQFdxWZeiPcDF+Hwf+IwSr+kCAwEAAaMxMC8wDgYDVR0PAQH/BAQDAgeAMB0GA1Ud\nDgQWBBQNvzYzJyXemGhxbA8NMXLolDnPyjANBgkqhkiG9w0BAQsFAAOCAQEARIJV\noKejGlOTn71QutnNnu07UtTu0IHs6YqjYzzND+m4JXLN+wvYm72AFUG0b1L7dRg0\niK8XjQrlNQNVqP1Mc6tffchy20neOPOHeiO6qTdRU8P2S8D3Uwe+1qhgxjfE+cWc\nwZmWxYK4HA8c58PxWMqrkr2QqXDplG9KWLvOgrtPGiLLZcQSKhvvB63QzItHBDU6\nRayiJY3oPkK/HrIvFlySqFqzWmuyknkciOFywEHQMz/tcSFJ2QFpPj/tBz9VXohH\nZ8KscmfhZrTPBjo+ky1lz/WraWoz4LMiLnkC2ABczWLRSawu+v3Irx1NFJngt05e\npqwtqIUeg7j+JLiTaA==\n-----END CERTIFICATE-----"
+./vendor/bundle/ruby/3.0.0/gems/httpclient-2.9.0/test/test_hexdump.rb:9:    assert_equal(["00000000  1a6cbff8 a2398e9e e95b7b7b b2e8bcfe   .l...9...[{{...."], HexDump.encode(str))
+./vendor/bundle/ruby/3.0.0/gems/pstore-0.2.1/lib/pstore.rb:600:  CHECKSUM_ALGO = %w[SHA512 SHA384 SHA256 SHA1 RMD160 MD5].each do |algo|
+./battle_state.rb:63:  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
+./battle_state.rb:139:  rows = creature_sheet.read('스탯!A2:Z100') rescue []
+./battle_state.rb:152:  rows = creature_sheet.read('스탯!A2:Z100') rescue []
+./battle_state.rb:168:  rows = creature_sheet.read('스탯!A2:Z100') rescue []
+./battle_state.rb:549:  rows = creature_sheet.read('보스스킬!A2:A300') rescue []

@@ -1,66 +1,42 @@
-# toot_builder.rb
-
 class TootBuilder
-  MAX_LENGTH = 1000
+  MAX_LENGTH = 980
 
-  def initialize(round, creature_name, log)
-    @round = round
-    @creature_name = creature_name
-    @log = log
+  def initialize(round, team_name, is_first, log)
+    @round     = round
+    @team_name = team_name
+    @is_first  = is_first
+    @log       = log
   end
 
   def build
-    header = "[#{@round}라운드] #{@creature_name} 전투 결과"
+    order  = @is_first ? '선공' : '후공'
+    header = "[#{@round}라운드] #{@team_name} (#{order}) 행동 정산"
 
     sections = []
+    sections << "▷ 지원\n" + @log[:support].join("\n") unless @log[:support].empty?
+    sections << "▷ 이동\n" + @log[:move].join("\n") unless @log[:move].empty?
+    sections << "▷ 공격\n" + @log[:attack].join("\n") unless @log[:attack].empty?
+    sections << "▷ 방어\n" + @log[:defense].join("\n") unless @log[:defense].empty?
+    sections << "▷ 현황\n" + @log[:result].join("\n") unless @log[:result].empty?
 
-    add_section(sections, "행동", @log[:actions])
-    add_section(sections, "이동", @log[:move])
-    add_section(sections, "공격", @log[:attack])
-    add_section(sections, "회복", @log[:heal])
-    add_section(sections, "방어", @log[:defense])
-    add_section(sections, "크리쳐", @log[:creature])
-    add_section(sections, "현황", @log[:result])
+    full_text = header + (sections.empty? ? "" : "\n\n" + sections.join("\n\n"))
 
-    text = header
-
-    unless sections.empty?
-      text += "\n\n"
-      text += sections.join("\n\n")
+    if full_text.length <= MAX_LENGTH
+      return [full_text]
     end
 
-    split(text)
-  end
-
-  private
-
-  def add_section(list, title, contents)
-    return if contents.nil?
-    return if contents.empty?
-
-    list << "▷ #{title}\n#{contents.join("\n")}"
-  end
-
-  def split(text)
-    return [text] if text.length <= MAX_LENGTH
-
-    lines = text.split("\n")
-
-    result = []
-    current = ""
-
-    lines.each do |line|
-      if (current + line + "\n").length > MAX_LENGTH
-        result << current.rstrip
-        current = ""
+    toots = []
+    current = header.dup
+    sections.each do |sec|
+      candidate = current + "\n\n" + sec
+      if candidate.length <= MAX_LENGTH
+        current = candidate
+      else
+        toots << current
+        current = sec
       end
-
-      current << line
-      current << "\n"
     end
-
-    result << current.rstrip unless current.empty?
-
-    result
+    toots << current
+    toots
   end
 end

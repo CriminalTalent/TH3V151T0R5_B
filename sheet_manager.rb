@@ -17,6 +17,24 @@ class SheetManager
   end
 
   # ──────────────────────────────────────────────
+  # 전투로그 탭 기록 (실패해도 봇 동작에는 영향 없음)
+  # ──────────────────────────────────────────────
+
+  BATTLE_LOG_SHEET = '전투로그'.freeze
+
+  def append_battle_log(row)
+    body = Google::Apis::SheetsV4::ValueRange.new(values: [row])
+    @service.append_spreadsheet_value(
+      @sheet_id, "#{BATTLE_LOG_SHEET}!A:E", body,
+      value_input_option: 'RAW'
+    )
+    true
+  rescue => e
+    puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
+    false
+  end
+
+  # ──────────────────────────────────────────────
   # 기본 I/O
   # ──────────────────────────────────────────────
 
@@ -67,6 +85,16 @@ class SheetManager
     truthy?(rows[0][0])
   end
 
+  # 시트 읽기 실패(타임아웃 등) 시 nil을 반환해 호출부가 이전 상태를 유지할 수 있게 합니다.
+  def read_bot_on_or_nil
+    rows = @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values || []
+    return false if rows.empty? || rows[0].nil?
+    truthy?(rows[0][0])
+  rescue => e
+    puts "[시트 읽기 오류] '실행'!A2: #{e.message} (이전 상태 유지)"
+    nil
+  end
+
   def read_visibility
     rows = read("'실행'!B2")
     return 'direct' if rows.empty? || rows[0].nil? || rows[0][0].to_s.strip.empty?
@@ -111,8 +139,9 @@ class SheetManager
       id = row[0].to_s.strip
       next if id.empty?
 
-      hp = row[4].to_i
-      hp = 50 if hp <= 0
+      # E열이 비어있거나 숫자가 아니면 기본 50, "0"이면 전투불가(0) 그대로 유지
+      hp_raw = row[4].to_s.strip
+      hp = hp_raw.match?(/\A-?\d+\z/) ? [hp_raw.to_i, 0].max : 50
 
       {
         name:         id,
@@ -309,5 +338,38 @@ class SheetManager
       return text if text.match?(/\A[A-G][1-8]\z/)
     end
     nil
+  end
+end
+
+def update_position(runner_name, pos)
+  return false unless pos.to_s.match?(/\A[A-G][1-8]\z/)
+  
+  begin
+    rows = read_range('D3', 'A:Z')
+    return false if rows.empty?
+    
+    headers = header_map(rows[0])
+    pos_col = header_col(headers, '위치', 'B')
+    
+    row_idx = rows.find_index { |row| row[1].to_s.strip == runner_name.to_s.strip }
+    return false unless row_idx
+    
+    write_range('D3', "#{pos_col}#{row_idx + 1}", [[pos]])
+    true
+  rescue => e
+    puts "[update_position 오류] #{e.class}: #{e.message}"
+    false
+  end
+end
+
+def read_auto_mode
+  begin
+    row = read_range('실행', 'C2:C2')
+    return false if row.empty?
+    
+    value = row[0][0].to_s.strip.downcase
+    value == 'true' || value == '체크' || value == 'x' || value == '1'
+  rescue
+    false
   end
 end

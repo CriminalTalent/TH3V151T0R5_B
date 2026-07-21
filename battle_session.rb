@@ -4,7 +4,7 @@ class BattleSession
   attr_accessor :id, :mode, :round, :active, :announced, :actions,
                 :start_time, :auto_next_round_timer, :creature, :runner_names,
                 :runner_tags, :processed_messages, :passive_ctx, :thread_reply_id,
-                :thread_ids
+                :thread_ids, :dead_runners, :phase, :awaiting_boss
 
   def initialize(id:, mode:, runner_names:, creature:, thread_reply_id: nil, round: 1)
     @id = id.to_s
@@ -24,6 +24,18 @@ class BattleSession
     @thread_ids = Set.new
     @thread_ids.add(thread_reply_id.to_s) if thread_reply_id
     @thread_ids.add(@id)
+    @dead_runners = []
+    @phase = :prep
+    @awaiting_boss = false
+  end
+
+  # 전투불가(체력 0) 러너를 제외한, 이번 라운드 행동이 필요한 인원 수
+  def required_actions
+    (@runner_names - @dead_runners.to_a).size
+  end
+
+  def mark_dead_runners(names)
+    @dead_runners = (@dead_runners.to_a | names.map { |n| n.to_s.gsub('@', '').strip }).select { |n| @runner_names.include?(n) }
   end
 
   def dm_mode?

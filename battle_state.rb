@@ -55,12 +55,12 @@ end
 
 # 보스스킬 탭 최종 구조:
 # A 스킬명, B 분류, C 범위, D 쿨타임, E 배율, F 디버프,
-# G 피해공식, H 범위형태, I 이동회피, J 대상수, K 설명
+# G 피해공식, H 범위형태, I 이동회피, J 대상수, K 설명, L 전조
 def read_boss_skill_definition(creature_sheet, skill_name)
   skill_name = skill_name.to_s.strip
   return {} if skill_name.empty? || skill_name == '-'
 
-  rows = creature_sheet.read('보스스킬!A2:K300') rescue []
+  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
   row = rows.find { |r| r[0].to_s.strip == skill_name }
   return {} unless row
 
@@ -75,7 +75,8 @@ def read_boss_skill_definition(creature_sheet, skill_name)
     range_shape:    row[7].to_s.strip,
     dodgeable:      row[8].to_s.strip,
     target_count:   row[9].to_s.strip,
-    skill_desc:     row[10].to_s.strip
+    skill_desc:     row[10].to_s.strip,
+    omen:           row[11].to_s.strip
   }
 rescue => e
   puts "[전투봇] 보스스킬 읽기 실패: #{e.class}: #{e.message}"
@@ -108,6 +109,32 @@ def apply_boss_skill_definition!(creature, creature_sheet)
   creature
 end
 
+# 라운드 안내 시점에 스탯 탭 E열(현재스킬)과 보스스킬 탭 정의를 다시 읽어 반영합니다.
+# (체력/위치 등 전투 진행 상태는 세션 값을 유지)
+def refresh_creature_skill!(creature, creature_sheet)
+  name = creature[:name].to_s.strip
+  return creature if name.empty?
+
+  latest = creature_from_stats_sheet_by_name(creature_sheet, name)
+  if latest
+    creature[:current_skill] = latest[:current_skill]
+    creature[:pattern]       = latest[:current_skill]
+  end
+
+  # 이전 스킬 정의가 남지 않도록 스킬 관련 필드 초기화 후 재적용
+  [:skill_target, :skill_range, :pattern_cells, :debuff, :pattern_multiplier,
+   :pattern_cooldown, :skill_category, :range_shape, :damage_formula,
+   :dodgeable, :target_count, :skill_desc, :omen, :skill_range_default,
+   :skill_multiplier_default, :skill_debuff_default, :skill_cooldown_default].each do |key|
+    creature[key] = ''
+  end
+
+  apply_boss_skill_definition!(creature, creature_sheet)
+rescue => e
+  puts "[전투봇] 크리쳐 스킬 갱신 실패: #{e.class}: #{e.message}"
+  creature
+end
+
 def active_creature_from_stats_sheet(creature_sheet)
   rows = creature_sheet.read('스탯!A2:Z100') rescue []
   row = rows.find { |r| truthy_value?(r[0]) && !r[1].to_s.strip.empty? }
@@ -124,6 +151,7 @@ def creature_from_stats_sheet_by_name(creature_sheet, creature_name)
 
   rows = creature_sheet.read('스탯!A2:Z100') rescue []
   row = rows.find { |r| r[1].to_s.strip == target }
+  row ||= rows.find { |r| r[1].to_s.gsub(/\s+/, '') == target.gsub(/\s+/, '') }
   return nil unless row
   parse_creature_stats_row(row)
 rescue => e
@@ -228,8 +256,7 @@ def build_fallback_runner_state(runner_names, runner_sheet, default_pos)
 
   runner_names.map do |name|
     stat = base_stats.find { |s| s[:name].to_s == name.to_s || s[:id].to_s == name.to_s }
-    hp = stat ? stat[:hp].to_i : 50
-    hp = 50 if hp <= 0
+    hp = stat ? [stat[:hp].to_i, 0].max : 50
 
     {
       name:    name,
@@ -293,9 +320,31 @@ def targetless_attack_skill?(action_type)
   ['폭발', '전체공격'].include?(action_type.to_s)
 end
 
-def validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, creature)
-  runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
-  actor = runner_state.find { |r| r[:name].to_s == username.to_s }
+def validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, creature, positions: nil)
+  runner_state = merge_runner_state(
+    view_sheet,
+    runner_sheet,
+    runner_names,
+    creature[:pos]
+  )
+
+  # 준비 라운드 또는 이전 행동에서 세션에 저장된 실제 좌표를
+  # 시트에서 읽은 좌표보다 우선해 검증에 사용합니다.
+  if positions.is_a?(Hash)
+    runner_state.each do |runner|
+      runner_name = runner[:name].to_s
+
+      pos = positions[runner_name]
+      pos = positions[runner_name.to_sym] if pos.nil?
+
+      pos = pos.to_s.strip.upcase
+      runner[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
+    end
+  end
+
+  actor = runner_state.find do |runner|
+    runner[:name].to_s == username.to_s
+  end
 
   unless runner_alive?(actor)
     puts "[전투봇] 행동 불가: @#{username}, actor=#{actor.inspect}, runner_names=#{runner_names.inspect}"
@@ -313,6 +362,11 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   skill = BattleSkills.get(action_type)
   return [false, '알 수 없는 행동입니다.'] unless skill
 
+  # 크리쳐(보스) 전용 스킬은 러너가 사용할 수 없습니다.
+  if ['지정공격1인', '지정공격다인', '범위공격', '전체공격'].include?(action_type.to_s)
+    return [false, "#{action_type}은(는) 크리쳐 전용 스킬입니다."]
+  end
+
   parts = skill_target_parts(action_target)
   target = normalize_target(parts[0])
 
@@ -322,7 +376,12 @@ def validate_action(username, action_type, action_target, runner_names, view_she
     # 대상 생략 공격 스킬은 현재 크리쳐를 대상으로 간주합니다.
     target = creature_name if target.empty? && targetless_attack_skill?(action_type)
 
-    unless ['크리쳐', creature_name].include?(target) || BattleGrid.valid_pos?(target)
+    # 크리쳐 이름은 공백을 무시하고 비교합니다. (감시자1 == 감시자 1)
+    same_creature = ['크리쳐', creature_name].include?(target) ||
+                    (!target.empty? && target.gsub(/\s+/, '') == creature_name.gsub(/\s+/, ''))
+    target = creature_name if same_creature
+
+    unless same_creature || BattleGrid.valid_pos?(target)
       return [false, "대상을 찾을 수 없습니다. [#{action_type}/#{creature_name}] 형식으로 입력해주세요."]
     end
 
@@ -330,8 +389,11 @@ def validate_action(username, action_type, action_target, runner_names, view_she
       return [false, "#{action_type}의 사거리 밖입니다. 현재 위치: #{actor[:pos]}, 대상: #{target}"]
     end
   elsif BattleSkills.support?(action_type) || BattleSkills.defense?(action_type)
-    # 자신 대상 스킬은 대상 생략 허용.
-    target = username if target.empty? && skill[:range].to_s == '자신'
+    # 범위형(사거리 내 전원 적용) 스킬은 인물 지정이 필요 없습니다.
+    area_skill = [:heal_area, :atk_buff_area, :dur_buff_area, :agi_buff_area].include?(skill[:kind])
+
+    # 자신 대상 스킬, 범위형 스킬, 방어(미지정 시 자신)는 대상 생략 허용.
+    target = username if target.empty? && (skill[:range].to_s == '자신' || area_skill || skill[:kind] == :dur_guard)
 
     # 다중 대상(콤마 구분) 지원: 첫 대상 기준으로 검증
     first_target = target.to_s.split(',').map { |t| normalize_target(t) }.reject(&:empty?).first.to_s
@@ -357,12 +419,23 @@ def command_pattern
   BattleSkills.command_regex
 end
 
-def record_battle_action(username, text, battle_actions, processed_messages, processed_id_set, processed_id, runner_names, view_sheet, runner_sheet, battle_creature, listener)
+def record_battle_action(username, text, battle_actions, processed_messages, processed_id_set, processed_id, runner_names, view_sheet, runner_sheet, battle_creature, listener, ctx = nil)
   puts "[전투봇] 행동 수신: @#{username} -> #{text}"
 
   if processed_messages[username]
     puts "[전투봇] 중복 행동 무시: @#{username} -> #{text}"
     processed_id_set.add(processed_id)
+    return
+  end
+
+  # [관찰]: 의도적으로 턴을 넘기는 명령. 행동 인원으로 집계되어 라운드 대기를 끝냅니다.
+  # (슬리데린 패시브 2번은 관찰/미행동 시 다음 라운드부터 행운 +10)
+  if text.match?(/\[관찰\]/)
+    battle_actions[username] = { type: '관찰', target: '' }
+    processed_messages[username] = true
+    processed_id_set.add(processed_id)
+    puts "[전투봇] 행동 등록 완료: #{username} → [관찰]"
+    listener.send_dm(username, '확인, 대기해주세요.')
     return
   end
 
@@ -384,7 +457,37 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   action_type = match[1]
   action_target = normalize_target(match[2])
 
-  valid, error_message = validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, battle_creature)
+  # 쿨타임이 돌지 않은 스킬을 다시 쓰면 즉시 안내하고 행동으로 등록하지 않습니다.
+  if ctx && action_type != '이동'
+    skill = BattleSkills.get(action_type)
+    if skill
+      if skill[:once] && ctx[:once_used][username][action_type]
+        puts "[전투봇] 1회성 스킬 재사용 차단: @#{username} -> #{action_type}"
+        listener.send_dm(username, "[#{action_type}]은(는) 전투 중 1회만 사용할 수 있는 스킬입니다. 이미 사용했어요. 다른 행동을 입력해주세요.")
+        processed_id_set.add(processed_id)
+        return
+      end
+
+      left = ctx[:cooldowns][username][action_type].to_i
+      if left > 0
+        puts "[전투봇] 쿨타임 차단: @#{username} -> #{action_type} (#{left}라운드 남음)"
+        listener.send_dm(username, "[#{action_type}]은(는) 아직 쿨타임 중입니다. (#{left}라운드 남음) 다른 행동을 입력해주세요.")
+        processed_id_set.add(processed_id)
+        return
+      end
+    end
+  end
+
+  valid, error_message = validate_action(
+    username,
+    action_type,
+    action_target,
+    runner_names,
+    view_sheet,
+    runner_sheet,
+    battle_creature,
+    positions: ctx.is_a?(Hash) ? ctx[:positions] : nil
+  )
 
   unless valid
     puts "[전투봇] 행동 검증 실패: @#{username} -> #{error_message}"
@@ -405,9 +508,20 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     if runner
       from_pos = runner[:pos].to_s.strip.upcase
       runner[:pos] = coord
+
+      # 화면 시트와 세션 위치를 함께 갱신합니다.
+      # 둘 중 하나만 갱신되면 다음 명령 검증에서 과거 좌표가
+      # 현재 좌표를 다시 덮어쓸 수 있습니다.
       view_sheet.update_runner_state(runner_state)
+
+      if ctx.is_a?(Hash)
+        ctx[:positions] ||= {}
+        ctx[:positions][username.to_s] = coord
+      end
+
       action_meta[:from] = from_pos
       action_meta[:to] = coord
+
       puts "[전투봇] #{username} 이동 #{from_pos} → #{coord}"
     end
   end
@@ -426,4 +540,14 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
 
   puts "[전투봇] 행동 등록 완료: #{username} → [#{action_type}/#{action_target}]"
   listener.send_dm(username, '확인, 대기해주세요.')
+end
+
+# 보스스킬 탭에 정의된 스킬명인지 확인 (공백 무시 비교 포함)
+def boss_skill_defined?(creature_sheet, name)
+  n = name.to_s.strip
+  return false if n.empty?
+  rows = creature_sheet.read('보스스킬!A2:A300') rescue []
+  rows.any? { |r| r[0].to_s.strip == n || r[0].to_s.gsub(/\s+/, '') == n.gsub(/\s+/, '') }
+rescue
+  false
 end

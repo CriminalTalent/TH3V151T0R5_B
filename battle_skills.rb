@@ -3,8 +3,8 @@
 
 module BattleSkills
   SKILLS = {
-    '회복' => { category: '지원', range: '근접', cooldown: 1, kind: :heal, ratio: 0.2 },
-    '활력' => { category: '지원', range: '2', cooldown: 1, kind: :heal, ratio: 1.0 },
+    '회복' => { category: '지원', range: '근접', cooldown: 1, kind: :heal, ratio: 0.5 },
+    '활력' => { category: '지원', range: '2', cooldown: 1, kind: :heal, ratio: 1.0, max_targets: 1 },
     '구원' => { category: '지원', range: '2', cooldown: 2, kind: :heal_area, ratio: 0.5 },
     '강화' => { category: '지원', range: '3', cooldown: 2, kind: :atk_buff_area, ratio: 0.5 },
     '보호' => { category: '지원', range: '근접', cooldown: 2, kind: :shield, value: 30, max_targets: 3 },

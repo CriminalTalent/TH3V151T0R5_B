@@ -52,14 +52,14 @@ class BattleCalculator
   end
 
   def self.hit?(attacker_tec)
-    hit_rate = [60 + attacker_tec, 0].max
+    hit_rate = [[60 + attacker_tec, 0].max, 100].min
     roll = rand(1..100)
     puts "[명중] 명중률 #{hit_rate}% / 주사위 #{roll} → #{roll <= hit_rate ? '명중' : '빗나감'}"
     roll <= hit_rate
   end
 
   def self.evade?(target_agi)
-    evade_rate = target_agi * 2
+    evade_rate = target_agi.to_i
     return false if evade_rate <= 0
     roll = rand(1..100)
     puts "[회피] 회피율 #{evade_rate}% / 주사위 #{roll} → #{roll <= evade_rate ? '회피' : '피격'}"
@@ -67,7 +67,7 @@ class BattleCalculator
   end
 
   def self.critical?(luck)
-    crit_rate = luck * 2
+    crit_rate = luck.to_i
     return false if crit_rate <= 0
     roll = rand(1..100)
     result = roll <= crit_rate
@@ -82,7 +82,7 @@ class BattleCalculator
   def self.calc_skill_damage(skill_name, base_atk, is_critical: false, extra_params: {})
     if skill_name == '고육지책'
       sacrifice = extra_params[:hp_sacrifice] || 0
-      bonus = (sacrifice / 10) * 5
+      bonus = sacrifice.to_i
       dmg = base_atk + bonus
       dmg = (dmg * 2).ceil if is_critical
       return dmg
@@ -105,7 +105,7 @@ class BattleCalculator
 
   def self.calc_heal(skill_name, base_atk, is_critical: false)
     multiplier = case skill_name
-                 when '회복' then 0.2
+                 when '회복' then 0.5
                  when '활력' then 1.0
                  when '구원' then 0.5
                  else 0.0
@@ -130,7 +130,7 @@ class BattleCalculator
   end
 
   def self.evade_detail(target_agi)
-    rate = [[target_agi.to_i * 2, 0].max, 100].min
+    rate = [[target_agi.to_i, 0].max, 100].min
     return { success: false, rate: rate, roll: nil } if rate <= 0
 
     roll = rand(1..100)
@@ -140,7 +140,7 @@ class BattleCalculator
   end
 
   def self.critical_detail(luck)
-    rate = [[luck.to_i * 2, 0].max, 100].min
+    rate = [[luck.to_i, 0].max, 100].min
     return { success: false, rate: rate, roll: nil } if rate <= 0
 
     roll = rand(1..100)
