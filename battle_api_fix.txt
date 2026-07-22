@@ -1,14 +1,24 @@
-battle_api.rb의 첫 줄을 다음과 같이 변경:
+def fetch_public_statuses
+  listener.fetch_public_statuses
+rescue []
+end
 
-현재:
-require 'json'
-require 'net/http'
-require 'uri'
-require_relative 'toot_builder'
+def fetch_conversations
+  listener.fetch_conversations
+rescue []
+end
 
-변경:
-require 'json'
-require 'net/http'
-require 'uri'
-require_relative 'toot_builder'
-require_relative 'mastodon_client'
+def fetch_notifications
+  listener.fetch_notifications
+rescue []
+end
+
+def snapshot_current_dm_ids(set)
+  fetch_conversations.each { |c| set.add(c['last_status']['id']) if c['last_status'] && c['last_status']['id'] }
+rescue nil
+end
+
+def snapshot_current_notification_ids(set)
+  fetch_notifications.each { |n| set.add(n['id']) if n && n['id'] }
+rescue nil
+end

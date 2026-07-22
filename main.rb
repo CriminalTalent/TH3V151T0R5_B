@@ -137,7 +137,8 @@ def announce_prep_round(session, view_sheet, runner_sheet, last_post_time)
 
   announcement = "#{session.runner_tags}\n\n" \
                  "[준비 라운드] #{session.creature[:name]}와의 전투!\n" \
-                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'} 방향: #{session.creature[:facing] || '하'})\n\n" \
+                 "점유칸: #{BattleGrid.creature_cells(session.creature).join(
                  "전장\n\n" \
                  "#{map_lines.join("\n")}\n" \
                  "───────────────────\n" \
@@ -159,11 +160,16 @@ def announce_prep_round(session, view_sheet, runner_sheet, last_post_time)
   new_time
 end
 
-def handle_prep_input(session, username, text, processed_set, processed_id, listener)
+def handle_prep_input(session, username, text, processed_set, processed_id, listener, global_set = nil, status_id = nil)
   processed_set.add(processed_id)
+
+  sid = (status_id || processed_id).to_s
+  return if global_set && global_set.include?(sid)
 
   m = text.to_s.match(/\[([A-Ga-g][1-8])\]/)
   return unless m
+
+  global_set.add(sid) if global_set
 
   pos = m[1].upcase
   if BattleGrid.creature_cells(session.creature).include?(pos)
@@ -186,8 +192,8 @@ def check_prep_completion(session, creature_sheet = nil)
   timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
   return unless all_set || timeout
 
-  session.phase = :battle
   session.awaiting_boss = false
+  session.phase = :announcing
   ctx[:boss_override] = { skill: '전체공격' }
   session.announced = false
   session.actions = {}
@@ -371,7 +377,8 @@ def announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
 
   announcement = "#{session.runner_tags}\n\n" \
                  "[#{session.round}라운드] #{session.creature[:name]}와의 전투 - 보스 턴\n" \
-                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'} 방향: #{session.creature[:facing] || '하'})\n\n" \
+                 "점유칸: #{BattleGrid.creature_cells(session.creature).join(
                  "전장\n\n" \
                  "#{map_lines.join("\n")}\n" \
                  "───────────────────\n" \
@@ -610,8 +617,7 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     log,
     runner_state,
     view_sheet,
-    timeout: round_timeout && !round_done,
-    shields: session.passive_ctx[:shields]
+    timeout: round_timeout && !round_done
   )
 
   Array(result).each do |part|
@@ -627,14 +633,6 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
 
   ctx = session.passive_ctx
   positions = (ctx[:positions] ||= {})
-  positions.each do |runner_name, pos|
-    next unless pos.to_s.match?(/\A[A-G][1-8]\z/)
-    begin
-      view_sheet.update_position(runner_name, pos)
-    rescue => e
-      puts "[전투봇] [세션 #{session.id}] 좌표 동기화 실패 @#{runner_name}: #{e.class}: #{e.message}"
-    end
-  end
 
   actions_text = session.actions.map { |name, act| "#{name}: [#{act[:type]}/#{act[:target]}]" }.join(' / ')
   sheet_log(creature_sheet, session.id, session.round, '정산',
@@ -658,7 +656,7 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     session.auto_next_round_timer = nil
     
     if session.auto_mode
-      auto_skill = select_auto_skill(session.creature)
+      auto_skill = select_auto_skill(session.creature, creature_sheet)
       if auto_skill
         session.passive_ctx[:boss_override] = { skill: auto_skill }
         session.awaiting_boss = false
@@ -671,18 +669,17 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
   end
 end
 
-def select_auto_skill(creature)
-  return nil unless creature
-  available = creature[:available_skills] || []
-  return nil if available.empty?
-  
-  priority_order = ['필수', '생존', '범위', '단일', '기본공격']
-  priority_order.each do |category|
-    skill = available.find { |s| s[:category].to_s.include?(category) }
-    return skill[:name] if skill
+def select_auto_skill(creature, creature_sheet)
+  return nil unless creature && creature_sheet
+  begin
+    rows = creature_sheet.read("'보스스킬'!A2:A")
+    names = rows.map { |r| r[0].to_s.strip }.reject(&:empty?)
+    return nil if names.empty?
+    names.sample
+  rescue => e
+    puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
+    nil
   end
-  
-  available.first[:name]
 end
 
 fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
@@ -805,7 +802,7 @@ loop do
       end
 
       if session.phase == :prep
-        handle_prep_input(session, username, content, processed_dm_ids, dm_id, listener)
+        handle_prep_input(session, username, content, processed_dm_ids, dm_id, listener, processed_action_status_ids, last_status['id'])
         next
       end
 
@@ -1034,7 +1031,7 @@ loop do
       end
 
       if session.phase == :prep
-        handle_prep_input(session, username, text, processed_notification_ids, notification_id, listener)
+        handle_prep_input(session, username, text, processed_notification_ids, notification_id, listener, processed_action_status_ids, status['id'])
         next
       end
 
@@ -1062,5 +1059,3 @@ loop do
   sleep(3)
 end
 
-require_relative 'battle_api_auto'
-require_relative 'post_battle_thread'

@@ -48,6 +48,11 @@ class MastodonClient
     request_get("/api/v1/conversations?#{query}") || []
   end
 
+  def notifications(limit: 20)
+    query = URI.encode_www_form(limit: limit)
+    request_get("/api/v1/notifications?#{query}") || []
+  end
+
   private
 
   def request_get(path)

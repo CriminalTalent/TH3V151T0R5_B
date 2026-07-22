@@ -101,6 +101,30 @@ class SheetManager
     truthy?(rows[0][0]) ? 'public' : 'direct'
   end
 
+
+  def read_auto_mode
+    rows = read("'실행'!C2")
+    return false if rows.empty? || rows[0].nil?
+    truthy?(rows[0][0])
+  end
+
+  def update_position(runner_name, pos)
+    return false unless pos.to_s.match?(/\A[A-G][1-8]\z/)
+    begin
+      rows = read_range('D3', 'A:Z')
+      return false if rows.empty?
+      headers = header_map(rows[0])
+      pos_col = header_col(headers, '위치', 'B')
+      row_idx = rows.find_index { |row| row[1].to_s.strip == runner_name.to_s.strip }
+      return false unless row_idx
+      write_range('D3', "#{pos_col}#{row_idx + 1}", [[pos]])
+      true
+    rescue => e
+      puts "[update_position 오류] #{e.class}: #{e.message}"
+      false
+    end
+  end
+
   # ──────────────────────────────────────────────
   # 크리쳐 활성화 정보
   # ──────────────────────────────────────────────
@@ -338,38 +362,5 @@ class SheetManager
       return text if text.match?(/\A[A-G][1-8]\z/)
     end
     nil
-  end
-end
-
-def update_position(runner_name, pos)
-  return false unless pos.to_s.match?(/\A[A-G][1-8]\z/)
-  
-  begin
-    rows = read_range('D3', 'A:Z')
-    return false if rows.empty?
-    
-    headers = header_map(rows[0])
-    pos_col = header_col(headers, '위치', 'B')
-    
-    row_idx = rows.find_index { |row| row[1].to_s.strip == runner_name.to_s.strip }
-    return false unless row_idx
-    
-    write_range('D3', "#{pos_col}#{row_idx + 1}", [[pos]])
-    true
-  rescue => e
-    puts "[update_position 오류] #{e.class}: #{e.message}"
-    false
-  end
-end
-
-def read_auto_mode
-  begin
-    row = read_range('실행', 'C2:C2')
-    return false if row.empty?
-    
-    value = row[0][0].to_s.strip.downcase
-    value == 'true' || value == '체크' || value == 'x' || value == '1'
-  rescue
-    false
   end
 end

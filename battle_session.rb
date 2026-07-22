@@ -1,7 +1,7 @@
 # encoding: UTF-8
 
 class BattleSession
-  attr_accessor :id, :mode, :round, :active, :announced, :actions,
+  attr_accessor :id, :auto_mode, :mode, :round, :active, :announced, :actions,
                 :start_time, :auto_next_round_timer, :creature, :runner_names,
                 :runner_tags, :processed_messages, :passive_ctx, :thread_reply_id,
                 :thread_ids, :dead_runners, :phase, :awaiting_boss

@@ -5,3 +5,14 @@ battle_phase.json
 
 main.rb.bak_flow
 *.bak_flow
+
+# Local backup and temporary files
+*.bak
+*.bak.*
+*.bak[0-9]*
+*.backup
+*.broken
+*.shell_bak
+*_broken
+*_broken_*
+*_error_*.backup
