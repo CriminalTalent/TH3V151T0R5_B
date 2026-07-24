@@ -123,8 +123,25 @@ module BattleBossPatterns
     cells.to_a.map(&:to_s).map(&:upcase).reject(&:empty?).join(' · ')
   end
 
-  def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil)
+  def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil)
     name = runner[:name]
+
+    # 희생(커버): 대상이 다른 아군의 보호를 받고 있으면 명중 판정 후 대상이 교체됩니다.
+    cover_name = ctx[:cover] ? ctx[:cover][name] : nil
+    if cover_name && runner_state
+      cover_runner = runner_state.find { |r| r[:name].to_s == cover_name.to_s }
+      if cover_runner && cover_runner[:hp].to_i > 0
+        unless BattleCalculator.hit?(creature[:tec].to_i)
+          log << "#{creature[:name]}의 공격 → #{cover_name}의 희생(#{name} 대신) 대상, 빗나감"
+          log << ''
+          return 0
+        end
+        log << "#{cover_name} → [희생] #{name} 대신 피격"
+        runner = cover_runner
+        name = runner[:name]
+      end
+    end
+
     stats = stats_of ? stats_of.call(name) : {}
 
     # 회피 판정: 보스의 모든 피해 패턴에 자동 적용 (민첩 버프 포함)
@@ -234,7 +251,8 @@ module BattleBossPatterns
             defended_multiplier: defended_multiplier,
             shields: shields,
             took_damage: took_damage,
-            agi_bonus: agi_bonus
+            agi_bonus: agi_bonus,
+            runner_state: runner_state
           )
         end
       end
@@ -291,7 +309,8 @@ module BattleBossPatterns
           defended_multiplier: defended_multiplier,
           shields: shields,
           took_damage: took_damage,
-          agi_bonus: agi_bonus
+          agi_bonus: agi_bonus,
+          runner_state: runner_state
         )
       end
     end
