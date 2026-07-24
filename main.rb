@@ -98,7 +98,12 @@ def post_session_thread(session, text, last_post_time)
   if response && response['id']
     session.mark_thread_id(response['id'])
     session.thread_ids ||= Set.new
+    Array(response['all_ids']).each { |id| session.thread_ids.add(id.to_s) }
     session.thread_ids.add(response['id'].to_s)
+
+    if response['partial']
+      puts "[전투봇] [세션 #{session.id}] 안내 분할 툿 일부만 게시됨 (#{response['sent_count']}/#{response['expected_count']}) — 재시도 예정"
+    end
   end
   [response, Time.now]
 end
@@ -160,14 +165,14 @@ def announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessi
                  "───────────────────"
 
   response, new_time = post_session_thread(session, announcement, last_post_time)
-  if response && response['id']
+  if response && response['id'] && !response['partial']
     session.announced = true
     session.phase = :prep
     puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출"
   else
     session.announced = false
     session.phase = :prep
-    puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출 실패"
+    puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
   end
   new_time
 end
@@ -399,14 +404,14 @@ def announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
                  "───────────────────"
 
   response, new_time = post_session_thread(session, announcement, last_post_time)
-  if response && response['id']
+  if response && response['id'] && !response['partial']
     session.announced = true
     session.phase = :boss_command
     puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출"
   else
     session.announced = false
     session.phase = :boss_command
-    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출 실패"
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
   end
   new_time
 end
@@ -524,14 +529,14 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
                  "───────────────────"
 
   response, new_time = post_session_thread(session, announcement, last_post_time)
-  if response && response['id']
+  if response && response['id'] && !response['partial']
     session.announced = true
     session.phase = :battle
     puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출"
   else
     session.announced = false
     session.phase = :announcing
-    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출 실패"
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
   end
   new_time
 end
@@ -615,7 +620,7 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
       response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n[안내] 라운드 정산 중 오류가 발생했습니다. 운영 계정이 보스 행동을 입력하면 다음 라운드로 진행됩니다.", last_post_time)
       last_post_time = new_time
     rescue => post_err
-      puts "[전투봇] 정산 실패 안내 송출 실패: #{post_err.class}: #{post_err.message}"
+      puts "[전투봇] [세션 #{session.id}] 정산 실패 안내 송출 실패: #{post_err.class}: #{post_err.message}"
     end
     return [last_post_time, false]
   end
