@@ -245,8 +245,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
+        existing = stat_bonus(ctx, r[:name], :atk)
         ctx[:buffs][r[:name]].reject! { |b| b[:stat] == :atk }
-    atk_bonus[r[:name]] += amount
+        atk_bonus[r[:name]] += (amount - existing)
         ctx[:buffs][r[:name]] << { stat: :atk, value: amount, turns: 1 }
         affected << r[:name]
       end
@@ -748,7 +749,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
 
   part2 += "#{creature_name}
 "
-  part2 += "#{view_sheet.health_bar(creature_hp, creature_max_hp)}
+  part2 += "#{view_sheet.health_bar(creature_hp, creature_max_hp)} (방향: #{creature[:facing] || '하'})
 "
   part2 += "점유칸: #{BattleGrid.creature_cells(creature).join(' · ')}
 "
