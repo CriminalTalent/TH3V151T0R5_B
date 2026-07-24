@@ -455,7 +455,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       before_hp = actor[:hp].to_i
       actor[:hp] -= cost
 
-      bonus = (cost / 10) * 5
+      bonus = cost
       eff_atk += bonus
 
       log << "#{name}의 고육지책"
