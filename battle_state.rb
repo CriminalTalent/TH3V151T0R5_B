@@ -257,14 +257,16 @@ def build_fallback_runner_state(runner_names, runner_sheet, default_pos)
   runner_names.map do |name|
     stat = base_stats.find { |s| s[:name].to_s == name.to_s || s[:id].to_s == name.to_s }
     hp = stat ? [stat[:hp].to_i, 0].max : 50
+    max_hp = stat && stat[:max_hp].to_i > 0 ? stat[:max_hp].to_i : hp
 
     {
-      name:    name,
-      pos:     'D3',
-      hp:      hp,
-      max_hp:  hp,
-      status:  '',
-      facing:  stat && stat[:facing].to_s.strip.empty? == false ? stat[:facing] : '하'
+      name:         name,
+      display_name: stat && stat[:display_name],
+      pos:          'D3',
+      hp:           hp,
+      max_hp:       max_hp,
+      status:       '',
+      facing:       stat && stat[:facing].to_s.strip.empty? == false ? stat[:facing] : '하'
     }
   end
 rescue => e
