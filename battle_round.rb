@@ -751,7 +751,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
 "
   part2 += "#{view_sheet.health_bar(creature_hp, creature_max_hp)} (방향: #{creature[:facing] || '하'})
 "
-  part2 += "점유칸: #{BattleGrid.creature_cells(creature).join(' · ')}
+  part2 += "점유칸: #{BattleGrid.occupied_cells_label(creature)}
 "
   part2 += "
 "
