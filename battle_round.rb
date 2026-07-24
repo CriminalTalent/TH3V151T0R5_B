@@ -305,7 +305,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         ok, msg = BattleGrid.movable?(target[:pos], coord, runner_state, creature, actor_name: target[:name])
         if ok
           target[:pos] = coord
-          log << "#{name}의 행운부여 → #{target_name}을(를) #{coord}로 이동"
+          log << "#{display_name_of.call(name)}의 행운부여 → #{target_name}을(를) #{coord}로 이동"
         else
           log << "#{name}의 행운부여 실패 → #{msg}"
         end
@@ -459,8 +459,8 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       bonus = cost
       eff_atk += bonus
 
-      log << "#{name}의 고육지책"
-      log << "#{name} 건강 #{before_hp} → #{actor[:hp]} (소모 #{cost})"
+      log << "#{display_name_of.call(name)}의 고육지책"
+      log << "#{display_name_of.call(name)} 건강 #{before_hp} → #{actor[:hp]} (소모 #{cost})"
       log << "마법능력 +#{bonus}"
     elsif skill[:kind] == :rush
       parts = skill_parts(act[:target])
@@ -471,7 +471,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
           old_pos = actor[:pos]
           actor[:pos] = dest
-          log << "#{name}의 습격 이동 #{old_pos} → #{dest}"
+          log << "#{display_name_of.call(name)}의 습격 이동 #{old_pos} → #{dest}"
         end
       end
     end
@@ -479,7 +479,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     apply_damage_to_creature(
       log,
       creature,
-      name,
+      display_name_of.call(name),
       skill_name,
       eff_atk,
       multiplier,
@@ -537,7 +537,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
           log << "#{creature[:name]}의 반격 → 빗나감!"
         else
           if BattleCalculator.evade?(ts[:agi].to_i + agi_bonus[tname])
-            log << "#{creature[:name]}의 반격 → #{tname} 회피!"
+            log << "#{creature[:name]}의 반격 → #{display_name_of.call(tname)} 회피!"
           else
             crit = BattleCalculator.critical?(creature[:luck].to_i)
             base = crit ? creature[:atk].to_i * 2 : creature[:atk].to_i
@@ -546,7 +546,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
             if ts[:house].to_s.strip == '그리핀도르' && ts[:passive] == '1' &&
                BattleCalculator.in_front?(target[:pos], creature[:pos], ts[:facing].to_s)
               eff_dur = (eff_dur * 1.5).ceil
-              log << "#{tname}: [그리핀도르] 공격자가 정면에 위치 — 내구도 1.5배"
+              log << "#{display_name_of.call(tname)}: [그리핀도르] 공격자가 정면에 위치 — 내구도 1.5배"
             end
 
             dmg = BattleCalculator.calc_damage(base, eff_dur.to_i)
@@ -555,24 +555,24 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
               blocked = [shields[tname], dmg].min
               shields[tname] -= blocked
               dmg -= blocked
-              log << "#{tname} 보호막 #{blocked} 흡수"
+              log << "#{display_name_of.call(tname)} 보호막 #{blocked} 흡수"
             end
 
             if ctx[:survive_once][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
               dmg = target[:hp].to_i - 1
               ctx[:survive_once].delete(tname)
-              log << "#{tname}: 필사즉생으로 건강 0 이하 방지"
+              log << "#{display_name_of.call(tname)}: 필사즉생으로 건강 0 이하 방지"
             elsif ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
                   !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
               dmg = target[:hp].to_i - 1
               ctx[:guard_used][tname] = true
-              log << "#{tname}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
+              log << "#{display_name_of.call(tname)}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
             end
 
             target[:hp] = [target[:hp].to_i - dmg, 0].max
             took_damage[tname] = true if dmg > 0
-            line = "#{creature[:name]}의 반격 → #{tname}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
-            line += " (#{original_target[:name]} 대신 피격)" if original_target != target
+            line = "#{creature[:name]}의 반격 → #{display_name_of.call(tname)}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
+            line += " (#{display_name_of.call(original_target[:name])} 대신 피격)" if original_target != target
             log << line
 
             if ctx[:revenge][tname] && dmg > 0
