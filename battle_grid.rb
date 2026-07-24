@@ -223,6 +223,24 @@ module BattleGrid
     [runner_symbol_by_name, creature_symbol, creature_name]
   end
 
+  def facing_arrow(facing)
+    case facing.to_s.strip
+    when '상' then '▲'
+    when '하' then '▼'
+    when '좌' then '◀'
+    when '우' then '▶'
+    else '?'
+    end
+  end
+
+  def occupied_cells_label(creature)
+    cells = creature_cells(creature)
+    head = creature[:pos].to_s.strip.upcase
+    arrow = facing_arrow(creature[:facing] || '하')
+
+    cells.map { |cell| cell == head ? "#{cell}(머리 #{arrow})" : cell }.join(', ')
+  end
+
   def render(runner_state, creature)
     runner_by_pos = occupied_by_runners(runner_state)
     creature_by_pos = occupied_by_creature(creature)
