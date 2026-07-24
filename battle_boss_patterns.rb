@@ -125,20 +125,25 @@ module BattleBossPatterns
 
   def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil)
     name = runner[:name]
+    dname = runner[:display_name].to_s.strip
+    dname = name.to_s if dname.empty?
 
     # 희생(커버): 대상이 다른 아군의 보호를 받고 있으면 명중 판정 후 대상이 교체됩니다.
     cover_name = ctx[:cover] ? ctx[:cover][name] : nil
     if cover_name && runner_state
       cover_runner = runner_state.find { |r| r[:name].to_s == cover_name.to_s }
       if cover_runner && cover_runner[:hp].to_i > 0
+        cover_dname = cover_runner[:display_name].to_s.strip
+        cover_dname = cover_name.to_s if cover_dname.empty?
         unless BattleCalculator.hit?(creature[:tec].to_i)
-          log << "#{creature[:name]}의 공격 → #{cover_name}의 희생(#{name} 대신) 대상, 빗나감"
+          log << "#{creature[:name]}의 공격 → #{cover_dname}의 희생(#{dname} 대신) 대상, 빗나감"
           log << ''
           return 0
         end
-        log << "#{cover_name} → [희생] #{name} 대신 피격"
+        log << "#{cover_dname} → [희생] #{dname} 대신 피격"
         runner = cover_runner
         name = runner[:name]
+        dname = cover_dname
       end
     end
 
@@ -150,10 +155,10 @@ module BattleBossPatterns
     eff_agi = base_agi + (agi_bonus ? agi_bonus[name].to_i : 0)
     evade_detail = BattleCalculator.evade_detail(eff_agi)
     if evade_detail[:roll]
-      log << "#{name} 회피 #{evade_detail[:rate]}% → #{evade_detail[:roll]} (#{evade_detail[:success] ? '회피' : '피격'})"
+      log << "#{dname} 회피 #{evade_detail[:rate]}% → #{evade_detail[:roll]} (#{evade_detail[:success] ? '회피' : '피격'})"
     end
     if evade_detail[:success]
-      log << "#{name} 회피 — 피해 없음"
+      log << "#{dname} 회피 — 피해 없음"
       log << ''
       return 0
     end
@@ -169,13 +174,13 @@ module BattleBossPatterns
       blocked = [shields[name].to_i, dmg].min
       shields[name] -= blocked
       dmg -= blocked
-      log << "#{name} 보호막 #{blocked} 흡수"
+      log << "#{dname} 보호막 #{blocked} 흡수"
     end
 
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
     took_damage[name] = true if took_damage && dmg > 0
 
-    log << "-#{name}"
+    log << "-#{dname}"
     log << "피해:#{dmg}"
     log << "HP: #{runner[:hp].to_i + dmg} → #{runner[:hp]}"
 
@@ -183,7 +188,7 @@ module BattleBossPatterns
 
     if runner[:hp].to_i <= 0
       runner[:status] = '전투불가'
-      log << "#{name} 전투불가"
+      log << "#{dname} 전투불가"
     end
 
     dmg
