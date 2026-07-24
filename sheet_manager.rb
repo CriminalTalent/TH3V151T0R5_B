@@ -256,12 +256,13 @@ class SheetManager
   def read_runner_state
     read_base_stats.map do |stat|
       {
-        name:    stat[:name],
-        pos:     'D3',
-        hp:      stat[:hp].to_i,
-        max_hp:  stat[:max_hp].to_i,
-        status:  '',
-        facing:  stat[:facing].to_s.strip.empty? ? '하' : stat[:facing]
+        name:         stat[:name],
+        display_name: stat[:display_name],
+        pos:          'D3',
+        hp:           stat[:hp].to_i,
+        max_hp:       stat[:max_hp].to_i,
+        status:       '',
+        facing:       stat[:facing].to_s.strip.empty? ? '하' : stat[:facing]
       }
     end
   rescue => e
