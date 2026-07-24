@@ -125,7 +125,7 @@ def battle_end_text?(text)
     text.include?('[전투 중단]')
 end
 
-def announce_prep_round(session, view_sheet, runner_sheet, last_post_time)
+def announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessions: nil)
   ctx = session.passive_ctx
   ctx[:positions] ||= {}
 
@@ -135,10 +135,22 @@ def announce_prep_round(session, view_sheet, runner_sheet, last_post_time)
 
   map_lines = BattleGrid.render([], session.creature)
 
+  raid_overview = ''
+  if sessions
+    active_creatures = sessions.values.select(&:active).map do |s|
+      c = s.creature
+      "#{c[:name]} @ #{c[:pos]} (크기: #{c[:size] || '1x1'}, 머리 #{BattleGrid.facing_arrow(c[:facing] || '하')})"
+    end
+    if active_creatures.size > 1
+      raid_overview = "레이드 전체 몹 현황\n#{active_creatures.join("\n")}\n\n"
+    end
+  end
+
   announcement = "#{session.runner_tags}\n\n" \
                  "[준비 라운드] #{session.creature[:name]}와의 전투!\n" \
-                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'} 방향: #{session.creature[:facing] || '하'})\n\n" \
-                 "점유칸: #{BattleGrid.creature_cells(session.creature).join(
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
+                 "#{raid_overview}" \
+                 "점유칸: #{BattleGrid.occupied_cells_label(session.creature)}\n\n" \
                  "전장\n\n" \
                  "#{map_lines.join("\n")}\n" \
                  "───────────────────\n" \
@@ -378,7 +390,7 @@ def announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
   announcement = "#{session.runner_tags}\n\n" \
                  "[#{session.round}라운드] #{session.creature[:name]}와의 전투 - 보스 턴\n" \
                  "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'} 방향: #{session.creature[:facing] || '하'})\n\n" \
-                 "점유칸: #{BattleGrid.creature_cells(session.creature).join(
+                 "점유칸: #{BattleGrid.occupied_cells_label(session.creature)}\n\n" \
                  "전장\n\n" \
                  "#{map_lines.join("\n")}\n" \
                  "───────────────────\n" \
@@ -904,7 +916,7 @@ loop do
 
     sessions.values.select(&:active).each do |session|
       if session.phase == :prep && !session.announced
-        last_post_time = announce_prep_round(session, view_sheet, runner_sheet, last_post_time)
+        last_post_time = announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessions: sessions)
       elsif session.phase == :announcing
         last_post_time = announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_time)
       elsif session.phase == :boss_command && !session.announced
@@ -1058,4 +1070,3 @@ loop do
 
   sleep(3)
 end
-
