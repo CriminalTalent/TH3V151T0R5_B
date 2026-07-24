@@ -167,6 +167,10 @@ class SheetManager
       hp_raw = row[4].to_s.strip
       hp = hp_raw.match?(/\A-?\d+\z/) ? [hp_raw.to_i, 0].max : 50
 
+      # K열(최대건강)이 비어있거나 숫자가 아니면 현재 건강을 최대건강으로 사용
+      max_hp_raw = row[10].to_s.strip
+      max_hp = max_hp_raw.match?(/\A-?\d+\z/) && max_hp_raw.to_i > 0 ? max_hp_raw.to_i : hp
+
       {
         name:         id,
         id:           id,
@@ -174,13 +178,13 @@ class SheetManager
         house:        row[2].to_s.strip,
         passive:      row[3].to_s.strip,
         hp:           hp,
-        max_hp:       hp,
+        max_hp:       max_hp,
         dur:          row[5].to_i,
         atk:          row[6].to_i,
         agi:          row[7].to_i,
         tec:          row[8].to_i,
         luck:         row[9].to_i,
-        skill1:       row[10].to_s.strip,
+        skill1:       '',
         skill2:       row[11].to_s.strip,
         facing:       row[12].to_s.strip.empty? ? '하' : row[12].to_s.strip
       }
