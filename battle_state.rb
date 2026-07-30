@@ -20,6 +20,7 @@ def parse_creature_stats_row(row)
   # J 기술
   # K 행운
   # L 비고
+  # M 보상크레딧 (처치 시 파티 전원에게 지급, 비어있으면 0)
   name = row[1].to_s.strip
   return nil if name.empty?
 
@@ -27,10 +28,18 @@ def parse_creature_stats_row(row)
   hp = 200 if hp <= 0
 
   current_skill = row[4].to_s.strip
+  reward_raw = row[12].to_s.strip
+  reward = reward_raw.match?(/\A-?\d+\z/) ? reward_raw.to_i : 0
+
+  # 전투봇 격자는 A~G, 1~8 범위뿐이다. 조사맵 좌표(H~O 등) 같이 범위 밖 값이
+  # 잘못 들어와 있으면 사거리/이동 계산이 깨지므로 기본값(D4)으로 보정한다.
+  raw_pos = row[2].to_s.strip.upcase
+  pos = raw_pos.match?(/\A[A-G][1-8]\z/) ? raw_pos : 'D4'
+  puts "[전투봇] 크리쳐 '#{name}' 위치 '#{raw_pos}'가 전투 격자 범위(A~G,1~8) 밖이라 D4로 보정했습니다." if !raw_pos.empty? && pos != raw_pos
 
   {
     name:    name,
-    pos:     row[2].to_s.strip.upcase.empty? ? 'D4' : row[2].to_s.strip.upcase,
+    pos:     pos,
     size:    row[3].to_s.strip.downcase.empty? ? '1x1' : row[3].to_s.strip.downcase,
     hp:      hp,
     max_hp:  hp,
@@ -49,6 +58,7 @@ def parse_creature_stats_row(row)
     pattern_multiplier: '',
     pattern_cooldown: '',
     note: row[11].to_s.strip,
+    reward: reward,
     status: ''
   }
 end
