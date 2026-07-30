@@ -274,6 +274,16 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         healed << "#{tname} 건강 +#{t[:hp] - before}"
       end
       log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
+    when :heal_fixed
+      healed = []
+      target_names.each do |tname|
+        t = state_of.call(tname)
+        next unless t && t[:hp].to_i > 0
+        before = t[:hp].to_i
+        t[:hp] = [before + skill[:value].to_i, t[:max_hp].to_i].min
+        healed << "#{tname} 건강 +#{t[:hp] - before}"
+      end
+      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :heal_area
       healed = []
       runner_state.each do |r|
