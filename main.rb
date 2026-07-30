@@ -30,7 +30,7 @@ TRIGGER_SHEET_ID  = '1FIvnRTLlcDmx29TShi7XnX9uGYuEc-YC63B9b4Z1IHE'
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
 BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
 
-# 도망가기/말걸기 성공, 승리, 패배 후 조사맵 이동 가능 방향을 보여주기 위한
+# 승리/패배 후 조사맵 이동 가능 방향을 보여주기 위한
 # 조사봇(TH3V151T0R5_F) 시트. 설정하지 않으면 방향 안내를 생략한다.
 SCOUT_SHEET_ID      = ENV['SCOUT_SHEET_ID']
 SCOUT_GRID_SHEET_ID = ENV['SCOUT_GRID_SHEET_ID']
@@ -661,7 +661,7 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
 
   session.passive_ctx[:round] = session.round.to_i
   begin
-    log, runner_state, escape_result = settle_round(
+    log, runner_state = settle_round(
       session.actions,
       session.runner_names,
       runner_sheet,
@@ -690,26 +690,6 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
       puts "[전투봇] [세션 #{session.id}] 정산 실패 안내 송출 실패: #{post_err.class}: #{post_err.message}"
     end
     return [last_post_time, false]
-  end
-
-  # 도망가기/말걸기 성공 → 파티 전체 전투 즉시 종료
-  if escape_result
-    session.active = false
-    session.auto_next_round_timer = nil
-    session.awaiting_boss = false
-
-    reason_label = escape_result[:type] == :fled ? '도망 성공' : '말걸기 성공'
-    text = "#{session.runner_tags}\n\n[#{session.round}라운드] #{reason_label}\n\n" \
-           "#{Array(log).join("\n")}"
-
-    response, new_time = post_session_thread(session, text, last_post_time)
-    last_post_time = new_time
-
-    sheet_log(creature_sheet, session.id, session.round, '전투 종결', "#{reason_label} - #{escape_result[:name]}")
-    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{reason_label})"
-
-    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
-    return [last_post_time, true]
   end
 
   result = build_result_text(
