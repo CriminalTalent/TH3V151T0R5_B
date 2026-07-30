@@ -192,6 +192,52 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     log.concat(passive_lines)
   end
 
+  # 0) 이탈 (도망가기/말걸기) — 성공하면 파티 전체 전투가 즉시 종료된다.
+  # 스탯을 전혀 반영하지 않는 순수 다이스(50%) 판정.
+  escape_result = nil
+
+  battle_actions.each do |name, act|
+    skill_name = act[:type]
+    skill = BattleSkills.get(skill_name)
+    next unless skill && BattleSkills.escape?(skill_name)
+
+    actor = state_of.call(name)
+    next unless actor && actor[:hp].to_i > 0
+    dname = display_name_of.call(name)
+
+    case skill[:kind]
+    when :flee
+      roll = rand(100)
+      log << "#{dname}의 도망가기 → 판정 #{roll} (50% 확률)"
+      if roll < 50
+        log << "#{dname} 이(가) 도망에 성공했습니다! 전투가 종료됩니다."
+        escape_result = { type: :fled, name: name }
+      else
+        log << "#{dname}의 도망 실패."
+      end
+    when :talk
+      roll = rand(100)
+      log << "#{dname}의 말걸기 → 판정 #{roll} (50% 확률)"
+      if roll < 50
+        log << "#{dname}의 말이 통했습니다! 전투가 종료됩니다."
+        escape_result = { type: :talked, name: name }
+      else
+        log << "#{dname}의 말걸기 실패."
+      end
+    end
+
+    break if escape_result
+  end
+
+  if escape_result
+    ctx[:prev_took_damage] = took_damage
+    battle_actions.each { |n, act| ctx[:prev_action][n] = act[:type] }
+    cleanup_buffs!(ctx)
+    advance_cooldowns!(ctx)
+    view_sheet.update_runner_state(runner_state)
+    return [log, runner_state, escape_result]
+  end
+
   # 1) 지원
   battle_actions.each do |name, act|
     skill_name = act[:type]
@@ -617,7 +663,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   ctx[:survive_once] = {}
 
   view_sheet.update_runner_state(runner_state)
-  [log, runner_state]
+  [log, runner_state, nil]
 end
 
 def action_text_for_result(name, action, creature_name)
