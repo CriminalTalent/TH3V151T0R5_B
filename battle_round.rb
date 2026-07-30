@@ -1,824 +1,1170 @@
-# battle_round.rb
-# encoding: UTF-8
+$stdout.sync = true
+$stderr.sync = true
 
-# 전투 정산 순서:
-# 지원 → 방어 → 공격 → 크리쳐 반격
+require 'dotenv'
+require 'json'
+require 'time'
+require 'net/http'
+require 'uri'
+require 'set'
 
-def stat_bonus(ctx, name, stat)
-  ctx[:buffs][name].to_a.select { |b| b[:stat] == stat }.sum { |b| b[:value].to_i }
-end
+Dotenv.load(File.join(__dir__, '.env'))
 
-def cleanup_buffs!(ctx)
-  ctx[:buffs].each do |name, buffs|
-    buffs.each { |b| b[:turns] = b[:turns].to_i - 1 if b[:turns] }
-    ctx[:buffs][name] = buffs.reject { |b| b[:turns] && b[:turns] <= 0 }
+require_relative 'sheet_manager'
+require_relative 'mastodon_listener'
+require_relative 'battle_calculator'
+require_relative 'battle_util'
+require_relative 'battle_api'
+require_relative 'battle_state'
+require_relative 'battle_grid'
+require_relative 'battle_skills'
+require_relative 'battle_boss_patterns'
+require_relative 'battle_round'
+require_relative 'battle_session'
+require_relative 'scout_directions'
+
+RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
+CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
+VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
+TRIGGER_SHEET_ID  = '1FIvnRTLlcDmx29TShi7XnX9uGYuEc-YC63B9b4Z1IHE'
+CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
+BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
+
+# 도망가기/말걸기 성공, 승리, 패배 후 조사맵 이동 가능 방향을 보여주기 위한
+# 조사봇(TH3V151T0R5_F) 시트. 설정하지 않으면 방향 안내를 생략한다.
+SCOUT_SHEET_ID      = ENV['SCOUT_SHEET_ID']
+SCOUT_GRID_SHEET_ID = ENV['SCOUT_GRID_SHEET_ID']
+
+ROUND_WAIT_SECONDS = 60
+ACTION_WAIT_SECONDS = 300
+TRIGGER_CHECK_INTERVAL = 15
+POST_INTERVAL_SECONDS = 1.5
+
+LOCATION_MAP = {
+  '스토디시' => 'E7',
+  'A' => 'A1', 'B' => 'B1', 'C' => 'C1', 'D' => 'D1',
+  'E' => 'E1', 'F' => 'F1', 'G' => 'G1'
+}
+
+puts '[전투봇] 시작'
+
+runner_sheet   = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
+creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
+view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
+listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
+
+scout_sheet      = SCOUT_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_SHEET_ID, CREDENTIALS_PATH)
+scout_grid_sheet = SCOUT_GRID_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_GRID_SHEET_ID, CREDENTIALS_PATH)
+
+$trigger_sheet = SheetManager.new(TRIGGER_SHEET_ID, CREDENTIALS_PATH)
+
+puts '[전투봇] 초기화 완료 - 다중 전투 세션 모드'
+
+processed_statuses = Set.new
+processed_dm_ids = Set.new
+processed_notification_ids = Set.new
+processed_action_status_ids = Set.new
+handled_boss_status_ids = Set.new
+held_boss_logged_ids = Set.new
+handled_battle_end_status_ids = Set.new
+sessions = {}
+last_post_time = Time.at(0)
+
+def create_battle_session_from_status(status, content, mode, creature_sheet, bot_username, fallback_sender = nil)
+  usernames = extract_usernames_from_status(status, content, bot_username)
+  usernames = usernames.map { |u| u.to_s.gsub('@', '').strip }.reject(&:empty?).uniq
+
+  if usernames.empty? && fallback_sender
+    usernames = [fallback_sender.to_s.gsub('@', '').strip]
   end
+
+  return nil if usernames.empty?
+
+  creature = creature_from_start_content(content, creature_sheet)
+  creature[:pos] = 'D4' if creature[:pos].to_s.strip.empty?
+
+  session = BattleSession.new(
+    id: status['id'],
+    mode: mode,
+    runner_names: usernames,
+    creature: creature.dup,
+    thread_reply_id: status['id'],
+    round: content.match(/\[(\d+)\]/)&.[](1) || 1
+  )
+  session.thread_ids ||= Set.new
+  session.thread_ids.add(status['id'].to_s)
+  session.auto_mode = false
+  session
 end
 
-def advance_cooldowns!(ctx)
-  ctx[:cooldowns].each do |_name, skills|
-    skills.each_key { |sk| skills[sk] = skills[sk].to_i - 1 }
-    skills.reject! { |_sk, left| left.to_i <= 0 }
+def post_session_thread(session, text, last_post_time)
+  dm = ($trigger_sheet.read_visibility != 'public')
+  now = Time.now
+  sleep_time = POST_INTERVAL_SECONDS - (now - last_post_time)
+  sleep(sleep_time) if sleep_time > 0
+  
+  response = post_battle_thread(text, dm, session.thread_reply_id)
+  if response && response['id']
+    session.mark_thread_id(response['id'])
+    session.thread_ids ||= Set.new
+    Array(response['all_ids']).each { |id| session.thread_ids.add(id.to_s) }
+    session.thread_ids.add(response['id'].to_s)
+
+    if response['partial']
+      puts "[전투봇] [세션 #{session.id}] 안내 분할 툿 일부만 게시됨 (#{response['sent_count']}/#{response['expected_count']}) — 재시도 예정"
+    end
   end
+  [response, Time.now]
 end
 
-def skill_parts(raw)
-  raw.to_s.split('/').map(&:strip).reject(&:empty?)
+def sheet_log(creature_sheet, session_id, round, event, detail)
+  return unless creature_sheet
+  time = Time.now.strftime('%Y-%m-%d %H:%M:%S')
+  creature_sheet.append_battle_log([time, session_id.to_s, round.to_s, event.to_s, detail.to_s])
+rescue => e
+  puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
 end
 
-def split_targets(raw)
-  raw.to_s.split(',').map { |t| normalize_target(t) }.reject(&:empty?)
+def battle_start_text?(text)
+  text.to_s.include?('[전투시작]') || text.to_s.match?(/\[전투시작\//)
 end
 
-def creature_target?(target, creature)
-  ['크리쳐', creature[:name].to_s].include?(normalize_target(target)) || BattleGrid.valid_pos?(target)
+def battle_end_text?(text)
+  text = text.to_s
+  text.include?('[전투종료]') ||
+    text.include?('[전투중단]') ||
+    text.include?('[전투강제종료]') ||
+    text.include?('[전투취소]') ||
+    text.include?('[전투 종료]') ||
+    text.include?('[전투 중단]')
 end
 
-def can_use_once?(ctx, name, skill_name)
-  !ctx[:once_used][name][skill_name]
+def announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessions: nil)
+  ctx = session.passive_ctx
+  ctx[:positions] ||= {}
+
+  state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+  ctx[:prep_required] = state.select { |r| r[:hp].to_i > 0 }.map { |r| r[:name].to_s }
+  session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
+
+  map_lines = BattleGrid.render([], session.creature)
+
+  raid_overview = ''
+  if sessions
+    active_creatures = sessions.values.select(&:active).map do |s|
+      c = s.creature
+      "#{c[:name]} @ #{c[:pos]} (크기: #{c[:size] || '1x1'}, 머리 #{BattleGrid.facing_arrow(c[:facing] || '하')})"
+    end
+    if active_creatures.size > 1
+      raid_overview = "레이드 전체 몹 현황\n#{active_creatures.join("\n")}\n\n"
+    end
+  end
+
+  announcement = "#{session.runner_tags}\n\n" \
+                 "[준비 라운드] #{session.creature[:name]}와의 전투!\n" \
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
+                 "#{raid_overview}" \
+                 "점유칸: #{BattleGrid.occupied_cells_label(session.creature)}\n\n" \
+                 "전장\n\n" \
+                 "#{map_lines.join("\n")}\n" \
+                 "───────────────────\n" \
+                 "DM 또는 멘션으로 시작 위치를 입력해주세요.\n\n" \
+                 "형식: [좌표]\n" \
+                 "입력 대기: 5분\n" \
+                 "───────────────────"
+
+  response, new_time = post_session_thread(session, announcement, last_post_time)
+  if response && response['id'] && !response['partial']
+    session.announced = true
+    session.phase = :prep
+    puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출"
+  else
+    session.announced = false
+    session.phase = :prep
+    puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
+  end
+  new_time
 end
 
-def mark_once!(ctx, name, skill_name)
-  ctx[:once_used][name][skill_name] = true
+def handle_prep_input(session, username, text, processed_set, processed_id, listener, global_set = nil, status_id = nil)
+  processed_set.add(processed_id)
+
+  sid = (status_id || processed_id).to_s
+  return if global_set && global_set.include?(sid)
+
+  m = text.to_s.match(/\[([A-Ga-g][1-8])\]/)
+  return unless m
+
+  global_set.add(sid) if global_set
+
+  pos = m[1].upcase
+  if BattleGrid.creature_cells(session.creature).include?(pos)
+    listener.send_dm(username, "#{pos}은(는) #{session.creature[:name]}이(가) 점유한 칸입니다. 다른 좌표를 입력 해주세요.")
+    return
+  end
+
+  (session.passive_ctx[:positions] ||= {})[username.to_s] = pos
+  puts "[전투봇] [세션 #{session.id}] 시작 위치 등록: @#{username} → #{pos}"
 end
 
-# 쿨타임 게이트: 사용 가능하면 쿨타임을 기록하고 true, 쿨타임 중이면 false
-def cooldown_gate!(ctx, log, name, skill_name, skill)
-  return true if skill[:once]
-  cd = skill[:cooldown].to_i
-  return true if cd <= 0
+def check_prep_completion(session, creature_sheet = nil)
+  return unless session.active && session.phase == :prep && session.announced
 
-  left = ctx[:cooldowns][name][skill_name].to_i
-  if left > 0
-    log << "#{name}의 #{skill_name} → 쿨타임 #{left}라운드 남음 (행동 무효)"
+  ctx = session.passive_ctx
+  required  = (ctx[:prep_required] || session.runner_names).map(&:to_s)
+  positions = ctx[:positions] || {}
+
+  all_set = required.any? && required.all? { |name| positions[name].to_s.match?(/\A[A-G][1-8]\z/) }
+  timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
+  return unless all_set || timeout
+
+  session.awaiting_boss = false
+  session.phase = :announcing
+  ctx[:boss_override] = { skill: '전체공격' }
+  session.announced = false
+  session.actions = {}
+  session.processed_messages = {}
+  session.start_time = Time.now
+  puts "[전투봇] [세션 #{session.id}] 준비 라운드 완료 - #{session.round}라운드 시작 (보스 행동: 전체공격 고정)"
+  positions_text = positions.map { |k, v| "#{k}→#{v}" }.join(', ')
+  sheet_log(creature_sheet, session.id, session.round, '준비 라운드 완료',
+            "시작 위치: #{positions_text} / #{session.round}라운드 시작 (보스 행동: 전체공격 고정)")
+end
+
+def boss_command_text?(text)
+  text.to_s.match?(/\[보스행동커맨드\//)
+end
+
+def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold: false)
+  sender_clean = sender.to_s.gsub('@', '').strip
+  return :pass if sender_clean.empty?
+  return :pass if defined?(BOT_USERNAME) && sender_clean == BOT_USERNAME.to_s.gsub('@', '').strip
+  return :pass if sessions.values.any? { |s| s.includes_runner?(sender_clean) }
+
+  skill = nil
+  args  = nil
+
+  if (m = text.to_s.match(/\[보스행동커맨드\/([^\]]+)\]/))
+    args = m[1]
+  elsif (m = text.to_s.match(/\[([^\/\]]+)(?:\/([^\]]+))?\]/))
+    cand = m[1].to_s.strip
+    return :pass unless boss_skill_defined?(creature_sheet, cand)
+    skill = cand
+    args = m[2]
+  else
+    return :pass
+  end
+
+  status_id = status['id'].to_s
+  if status && status['in_reply_to_id']
+    root_or_thread_id = status['in_reply_to_id'].to_s
+    candidate_sessions = sessions.values.select do |s|
+      s.awaiting_boss && (s.id.to_s == root_or_thread_id || s.thread_ids.to_a.include?(root_or_thread_id))
+    end
+    
+    if candidate_sessions.length == 1
+      session = candidate_sessions.first
+    elsif candidate_sessions.length > 1
+      unless quiet_hold
+        puts "[전투봇] 보스행동커맨드 보류: 타래 연결이 모호함 (#{candidate_sessions.length}개 세션 매치, 자동 재시도)"
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 모호, 자동 재시도)")
+      end
+      return :hold
+    else
+      active_waiting = sessions.values.select(&:awaiting_boss)
+      if active_waiting.length == 1
+        session = active_waiting.first
+      elsif active_waiting.length > 1
+        unless quiet_hold
+          puts "[전투봇] 보스행동커맨드 보류: 타래 미연결 + 대기 세션 여럿 (자동 재시도)"
+          sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 미연결, 대기 세션 #{active_waiting.length}개, 자동 재시도)")
+        end
+        return :hold
+      else
+        puts "[전투봇] 보스행동커맨드 무시: 대기 중인 세션 없음"
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (대기 중인 세션 없음)")
+        return :ignored
+      end
+    end
+  else
+    active_waiting = sessions.values.select(&:awaiting_boss)
+    if active_waiting.length == 1
+      session = active_waiting.first
+    elsif active_waiting.length > 1
+      unless quiet_hold
+        puts "[전투봇] 보스행동커맨드 보류: 타래 미연결 + 대기 세션 여럿 (자동 재시도)"
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 미연결, 대기 세션 #{active_waiting.length}개, 자동 재시도)")
+      end
+      return :hold
+    else
+      puts "[전투봇] 보스행동커맨드 무시: 대기 중인 세션 없음"
+      sheet_log(creature_sheet, '-', '-', '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (대기 중인 세션 없음)")
+      return :ignored
+    end
+  end
+
+  tokens = args.to_s.split(%r{[\/,]}).map(&:strip).reject(&:empty?)
+
+  if skill.nil? && tokens.any? && boss_skill_defined?(creature_sheet, tokens.first)
+    skill = tokens.shift
+  end
+
+  cells = tokens.select { |t| t.match?(/\A[A-Ga-g][1-8]\z/) }.map(&:upcase)
+
+  if cells.any? && cells.size == tokens.size
+    active_count = sessions.values.count { |s| s.active && s.awaiting_boss && s.id != session.id }
+    if cells.any? || skill == '전체공격'
+      if active_count > 0
+        puts "[전투봇] 보스행동커맨드 거부: 좌표/전체공격은 활성 세션이 유일할 때만 허용됨"
+        sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 거부', "@#{sender_clean}: 좌표/전체공격 (다른 활성 세션 존재)")
+        return :ignored
+      end
+    end
+  end
+
+  override = {}
+  override[:skill] = skill if skill
+  if cells.any? && cells.size == tokens.size
+    override[:cells] = cells
+  elsif tokens.any?
+    targets_clean = tokens.map { |t| t.gsub('@', '').strip }
+    state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+    begin
+      base_stats = runner_sheet.read_base_stats
+    rescue
+      base_stats = []
+    end
+    state.each do |r|
+      stat = base_stats.find { |b| b[:name].to_s == r[:name].to_s }
+      label = stat ? stat[:display_name].to_s.strip : ''
+      r[:display_name] = label.empty? ? r[:name].to_s : label
+    end
+
+    invalid_targets = targets_clean.reject do |t|
+      state.any? { |r| r[:name].to_s == t || r[:display_name].to_s == t || r[:display_name].to_s.gsub(/\s+/, '') == t.gsub(/\s+/, '') }
+    end
+
+    if invalid_targets.any?
+      puts "[전투봇] [세션 #{session.id}] 보스행동커맨드 거부: 세션 외 대상 #{invalid_targets.join(', ')}"
+      sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 거부', "@#{sender_clean}: 세션 외 대상 #{invalid_targets.join(', ')}")
+      return :ignored
+    end
+
+    mapped = targets_clean.map do |t|
+      found = state.find do |r|
+        r[:name].to_s == t ||
+          r[:display_name].to_s == t ||
+          r[:display_name].to_s.gsub(/\s+/, '') == t.gsub(/\s+/, '')
+      end
+      found ? found[:name].to_s : t
+    end
+    override[:targets] = mapped
+  end
+
+  if override.empty?
+    puts '[전투봇] 보스행동커맨드 무시: 스킬/대상 없음'
+    sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (스킬/대상 없음)")
+    return :ignored
+  end
+
+  session.passive_ctx[:boss_override] = override
+  session.awaiting_boss = false
+  session.phase = :announcing
+  session.announced = false
+  session.actions = {}
+  session.processed_messages = {}
+  session.start_time = Time.now
+  desc = [skill, tokens.join(', ')].compact.reject { |v| v.to_s.empty? }.join(' / ')
+  puts "[전투봇] [세션 #{session.id}] 보스행동커맨드 적용 (@#{sender_clean}) → #{desc} / #{session.round}라운드"
+  sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 적용', "@#{sender_clean} → #{desc} / status=#{status_id}")
+  :applied
+end
+
+def announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
+  ctx = session.passive_ctx
+  positions = (ctx[:positions] ||= {})
+
+  state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+  begin
+    base_stats = runner_sheet.read_base_stats
+  rescue
+    base_stats = []
+  end
+  state.each do |r|
+    pos = positions[r[:name].to_s].to_s.upcase
+    r[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
+    stat = base_stats.find { |b| b[:name].to_s == r[:name].to_s }
+    label = stat ? stat[:display_name].to_s.strip : ''
+    r[:display_name] = label.empty? ? r[:name].to_s : label
+  end
+
+  alive_for_map = state.select { |r| r[:hp].to_i > 0 }
+  map_lines = BattleGrid.render(alive_for_map, session.creature)
+
+  announcement = "#{session.runner_tags}\n\n" \
+                 "[#{session.round}라운드] #{session.creature[:name]}와의 전투 - 보스 턴\n" \
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'} 방향: #{session.creature[:facing] || '하'})\n\n" \
+                 "점유칸: #{BattleGrid.occupied_cells_label(session.creature)}\n\n" \
+                 "전장\n\n" \
+                 "#{map_lines.join("\n")}\n" \
+                 "───────────────────\n" \
+                 "#{session.creature[:name]}이(가) 다음 행동을 준비하고 있습니다.\n" \
+                 "운영 계정의 보스 행동 입력 대기 중\n" \
+                 "───────────────────"
+
+  response, new_time = post_session_thread(session, announcement, last_post_time)
+  if response && response['id'] && !response['partial']
+    session.announced = true
+    session.phase = :boss_command
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출"
+  else
+    session.announced = false
+    session.phase = :boss_command
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
+  end
+  new_time
+end
+
+def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_time)
+  ctx = session.passive_ctx
+  positions = (ctx[:positions] ||= {})
+
+  state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+  begin
+    base_stats = runner_sheet.read_base_stats
+  rescue
+    base_stats = []
+  end
+  state.each do |r|
+    pos = positions[r[:name].to_s].to_s.upcase
+    r[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
+    stat = base_stats.find { |b| b[:name].to_s == r[:name].to_s }
+    label = stat ? stat[:display_name].to_s.strip : ''
+    r[:display_name] = label.empty? ? r[:name].to_s : label
+  end
+  session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
+
+  refresh_creature_skill!(session.creature, creature_sheet)
+  creature = session.creature
+
+  override = ctx.delete(:boss_override)
+  if override.is_a?(Hash)
+    if override[:skill].to_s.strip != ''
+      creature[:current_skill] = override[:skill].to_s.strip
+      creature[:pattern]       = creature[:current_skill]
+      apply_boss_skill_definition!(creature, creature_sheet)
+    end
+    if override[:cells].to_a.any?
+      creature[:skill_range]   = override[:cells].join(',')
+      creature[:pattern_cells] = override[:cells].join(',')
+      creature[:skill_target]  = ''
+    elsif override[:targets].to_a.any?
+      mapped = override[:targets].map do |t|
+        found = state.find do |r|
+          r[:name].to_s == t ||
+            r[:display_name].to_s == t ||
+            r[:display_name].to_s.gsub(/\s+/, '') == t.gsub(/\s+/, '')
+        end
+        found ? found[:name].to_s : t
+      end
+      creature[:skill_target] = mapped.join(',')
+    end
+  end
+
+  boss_preview = ''
+  skill_name = BattleBossPatterns.pattern_name(creature)
+  if !skill_name.empty? && skill_name != '-'
+    whole = skill_name == '전체공격' ||
+            BattleBossPatterns.range_shape(creature) == '전체' ||
+            creature[:skill_range_default].to_s.strip == '전체'
+    cells  = BattleBossPatterns.pattern_cells(creature)
+    target = BattleBossPatterns.skill_target(creature)
+
+    if !whole && cells.empty? && target.empty?
+      alive = state.select { |r| r[:hp].to_i > 0 }
+      picked = alive.sample([BattleBossPatterns.target_count(creature), 1].max)
+      creature[:skill_target] = picked.map { |r| r[:name].to_s }.join(',')
+      target = creature[:skill_target]
+    end
+
+    display_of = lambda do |id|
+      found = state.find { |r| r[:name].to_s == id.to_s }
+      found ? found[:display_name].to_s : id.to_s
+    end
+
+    label = if whole
+              '전체'
+            elsif cells.any?
+              cells.join(', ')
+            elsif !target.empty?
+              target.split(',').map(&:strip).map { |t| display_of.call(t) }.join(', ')
+            else
+              ''
+            end
+
+    unless label.empty?
+      power = BattleBossPatterns.pattern_damage(creature, BattleBossPatterns.pattern_multiplier(creature))
+      boss_preview  = "공격 대상(범위): #{label}\n"
+      boss_preview += "위력: #{power}\n" if power.to_i > 0 && BattleBossPatterns.skill_category(creature) != '디버프'
+      boss_preview += "\n"
+    end
+  end
+
+  omen = creature[:omen].to_s.strip
+  omen_block = omen.empty? ? '' : "#{omen}\n\n"
+
+  alive_for_map = state.select { |r| r[:hp].to_i > 0 }
+  map_lines = BattleGrid.render(alive_for_map, creature)
+
+  creature_name = creature[:name].to_s.strip
+  creature_name = '보스이름' if creature_name.empty? || creature_name == '크리쳐'
+  attack_lines = ["[스킬명/#{creature_name}]"]
+
+  announcement = "#{session.runner_tags}\n\n" \
+                 "[#{session.round}라운드] #{creature[:name]}와의 전투!\n\n" \
+                 "#{omen_block}" \
+                 "#{boss_preview}" \
+                 "#{creature[:name]} 상태: #{view_sheet.health_bar(creature[:hp], creature[:max_hp])} (위치: #{creature[:pos]}, 크기: #{creature[:size] || '1x1'})\n\n" \
+                 "전장\n\n" \
+                 "#{map_lines.join("\n")}\n" \
+                 "───────────────────\n" \
+                 "DM 또는 멘션으로 행동을 입력해주세요.\n\n" \
+                 "형식:\n" \
+                 "공격: #{attack_lines.join("\n")}\n" \
+                 "지원: [스킬명/아이디]\n" \
+                 "방어: [스킬명/아이디]\n" \
+                 "이동: [이동/좌표]\n" \
+                 "입력 대기: 5분\n" \
+                 "───────────────────"
+
+  response, new_time = post_session_thread(session, announcement, last_post_time)
+  if response && response['id'] && !response['partial']
+    session.announced = true
+    session.phase = :battle
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출"
+  else
+    session.announced = false
+    session.phase = :announcing
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
+  end
+  new_time
+end
+
+def find_session_for_action(sessions, username, status = nil)
+  username = username.to_s.gsub('@', '').strip
+  active = sessions.values.select { |s| s.active && s.includes_runner?(username) }
+  return nil if active.empty?
+
+  if status
+    related = active.find { |s| s.related_to_status?(status) }
+    return related if related
+  end
+
+  active.max_by { |s| s.start_time }
+end
+
+def process_action_for_session(session, username, text, processed_set, processed_id, runner_sheet, view_sheet, listener, processed_action_status_ids = nil, status_id = nil)
+  status_id ||= processed_id
+  if processed_action_status_ids && processed_action_status_ids.include?(status_id.to_s)
+    processed_set.add(processed_id)
     return false
   end
 
-  ctx[:cooldowns][name][skill_name] = cd
-  true
+  before = session.actions.size
+
+  record_battle_action(
+    username,
+    text,
+    session.actions,
+    session.processed_messages,
+    processed_set,
+    processed_id,
+    session.runner_names,
+    view_sheet,
+    runner_sheet,
+    session.creature,
+    listener,
+    session.passive_ctx
+  )
+
+  changed = session.actions.size > before
+  processed_action_status_ids.add(status_id.to_s) if processed_action_status_ids && changed
+  changed
 end
 
-def apply_damage_to_creature(log, creature, attacker_name, skill_name, atk_value, multiplier, dur, crit: false, guaranteed: false)
-  before_hp = creature[:hp].to_i
+def award_victory_credits!(session, scout_sheet, last_post_time)
+  return last_post_time unless scout_sheet
 
-  scaled = (atk_value.to_f * multiplier.to_f).ceil
-  final_power = crit ? scaled * 2 : scaled
-  dmg = BattleCalculator.calc_damage(final_power, dur.to_i)
+  reward = session.creature[:reward].to_i
+  return last_post_time if reward <= 0
 
-  creature[:hp] = [before_hp - dmg, 0].max
+  creature_name = session.creature[:name].to_s.strip
+  creature_name = '크리쳐' if creature_name.empty?
 
-  log << "#{attacker_name}의 #{skill_name}"
-  log << ''
-  log << "피해 계산"
-  log << "공격력 #{atk_value.to_i}"
-  log << "스킬 배율 ×#{multiplier.to_f}"
-  log << "= #{scaled}"
-
-  if crit
-    log << ''
-    log << "크리티컬 ×2"
-    log << "= #{final_power}"
+  lines = ["[보상] #{creature_name} 처치 — 크레딧 +#{reward}"]
+  session.runner_names.each do |acct|
+    new_total = ScoutDirections.add_credits(scout_sheet, acct, reward)
+    lines << if new_total
+               "@#{acct} 보유 크레딧: #{new_total}"
+             else
+               "@#{acct} 크레딧 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
+             end
   end
-
-  log << ''
-  log << "내구도 #{dur.to_i}"
-  log << ''
-  log << "실질 피해 #{dmg}"
-  log << ''
-  log << "#{creature[:name]} HP"
-  log << "#{before_hp} → #{creature[:hp]}"
-
-  dmg
-end
-
-def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, view_sheet, creature, ctx)
-  runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
-  base_stats   = runner_sheet.read_base_stats
-  stats_of = ->(name) { base_stats.find { |s| s[:name].to_s == name.to_s } || {} }
-  state_of = ->(name) { runner_state.find { |r| r[:name].to_s == name.to_s } }
-
-  # 스탯 시트의 캐릭터명과 준비 라운드에서 입력한 실제 위치를
-  # 정산용 runner_state에 다시 적용합니다.
-  saved_positions = ctx[:positions].is_a?(Hash) ? ctx[:positions] : {}
-
-  runner_state.each do |runner|
-    account_id = runner[:name].to_s
-    stat = stats_of.call(account_id)
-
-    display_name = stat[:display_name].to_s.strip
-    runner[:display_name] = display_name.empty? ? account_id : display_name
-
-    saved_pos = saved_positions[account_id]
-    saved_pos = saved_positions[account_id.to_sym] if saved_pos.nil?
-    saved_pos = saved_pos.to_s.strip.upcase
-
-    runner[:pos] = saved_pos if saved_pos.match?(/\A[A-G][1-8]\z/)
-  end
-
-  display_name_of = lambda do |name|
-    runner = state_of.call(name)
-    label = runner && runner[:display_name].to_s.strip
-    label.nil? || label.empty? ? name.to_s : label
-  end
-
-  log = []
-  took_damage = {}
-
-  BattleBossPatterns.apply_ongoing_debuffs!(log, runner_state, ctx)
-
-  atk_bonus  = Hash.new(0)
-  dur_bonus  = Hash.new(0)
-  tec_bonus  = Hash.new(0)
-  luck_bonus = Hash.new(0)
-  agi_bonus  = Hash.new(0)
-  defended_multiplier = Hash.new(1.0)
-  shields = ctx[:shields]
-
-  runner_names.each do |name|
-    atk_bonus[name]  += stat_bonus(ctx, name, :atk)
-    dur_bonus[name]  += stat_bonus(ctx, name, :dur)
-    tec_bonus[name]  += stat_bonus(ctx, name, :tec)
-    luck_bonus[name] += stat_bonus(ctx, name, :luck)
-    agi_bonus[name]  += stat_bonus(ctx, name, :agi)
-  end
-
-  passive_lines = []
-  runner_names.each do |name|
-    s  = stats_of.call(name)
-    st = state_of.call(name)
-    next unless st && st[:hp].to_i > 0
-
-    case s[:house].to_s.strip
-    when '그리핀도르'
-      if s[:passive] == '2' && st[:max_hp].to_i > 0 && st[:hp].to_f < st[:max_hp].to_i * 0.5
-        b = (s[:atk].to_i * 0.5).ceil
-        atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [그리핀도르] 건강 50% 미만 — 마법능력 +#{b}"
-      end
-    when '슬리데린'
-      if s[:passive] == '1' && ctx[:round].to_i > 1 && !ctx[:prev_took_damage][name]
-        b = (s[:atk].to_i * 0.5).ceil
-        atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [슬리데린] 이전 라운드 무피해 — 마법능력 +#{b}"
-      end
-      if s[:passive] == '2' && ctx[:slytherin_luck][name].to_i > 0
-        luck_bonus[name] += ctx[:slytherin_luck][name]
-        passive_lines << "#{display_name_of.call(name)}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][name]}"
-      end
-    when '래번클로'
-      if s[:passive] == '1' && !creature[:status].to_s.strip.empty?
-        b = (s[:atk].to_i * 0.5).ceil
-        atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [래번클로] 적 상태이상 감지 — 마법능력 +#{b}"
-      elsif s[:passive] == '2'
-        prev = ctx[:prev_action][name]
-        cur  = battle_actions[name]&.dig(:type)
-        if prev && cur && prev != cur
-          tec_bonus[name] += 10
-          passive_lines << "#{display_name_of.call(name)}: [래번클로] 행동 분류 변경 — 기술 +10"
-        end
-      end
-    when '후플푸프'
-      if s[:passive] == '1' && ctx[:prev_took_damage][name]
-        b = (s[:dur].to_i * 0.5).ceil
-        dur_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [후플푸프] 이전 라운드 피격 — 내구도 +#{b}"
-      end
-    end
-  end
-
-  if passive_lines.any?
-    log << '[기숙사 패시브]'
-    log.concat(passive_lines)
-  end
-
-  # 0) 이탈 (도망가기/말걸기) — 성공하면 파티 전체 전투가 즉시 종료된다.
-  # 스탯을 전혀 반영하지 않는 순수 다이스(50%) 판정.
-  escape_result = nil
-
-  battle_actions.each do |name, act|
-    skill_name = act[:type]
-    skill = BattleSkills.get(skill_name)
-    next unless skill && BattleSkills.escape?(skill_name)
-
-    actor = state_of.call(name)
-    next unless actor && actor[:hp].to_i > 0
-    dname = display_name_of.call(name)
-
-    case skill[:kind]
-    when :flee
-      roll = rand(100)
-      log << "#{dname}의 도망가기 → 판정 #{roll} (50% 확률)"
-      if roll < 50
-        log << "#{dname} 이(가) 도망에 성공했습니다! 전투가 종료됩니다."
-        escape_result = { type: :fled, name: name }
-      else
-        log << "#{dname}의 도망 실패."
-      end
-    when :talk
-      roll = rand(100)
-      log << "#{dname}의 말걸기 → 판정 #{roll} (50% 확률)"
-      if roll < 50
-        log << "#{dname}의 말이 통했습니다! 전투가 종료됩니다."
-        escape_result = { type: :talked, name: name }
-      else
-        log << "#{dname}의 말걸기 실패."
-      end
-    end
-
-    break if escape_result
-  end
-
-  if escape_result
-    ctx[:prev_took_damage] = took_damage
-    battle_actions.each { |n, act| ctx[:prev_action][n] = act[:type] }
-    cleanup_buffs!(ctx)
-    advance_cooldowns!(ctx)
-    view_sheet.update_runner_state(runner_state)
-    return [log, runner_state, escape_result]
-  end
-
-  # 1) 지원
-  battle_actions.each do |name, act|
-    skill_name = act[:type]
-    skill = BattleSkills.get(skill_name)
-    next unless skill && BattleSkills.support?(skill_name)
-
-    actor = state_of.call(name)
-    next unless actor && actor[:hp].to_i > 0
-    s = stats_of.call(name)
-    parts = skill_parts(act[:target])
-    target_names = split_targets(parts[0])
-    target_name = target_names.first.to_s
-    target = state_of.call(target_name)
-
-    if skill[:once]
-      if !can_use_once?(ctx, name, skill_name)
-        log << "#{name}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
-        next
-      end
-      mark_once!(ctx, name, skill_name)
-    end
-
-    next unless cooldown_gate!(ctx, log, name, skill_name, skill)
-
-    case skill[:kind]
-    when :heal
-      healed = []
-      target_names.each do |tname|
-        t = state_of.call(tname)
-        next unless t && t[:hp].to_i > 0
-        heal = (s[:atk].to_i * skill[:ratio].to_f).ceil
-        before = t[:hp].to_i
-        t[:hp] = [before + heal, t[:max_hp].to_i].min
-        healed << "#{tname} 건강 +#{t[:hp] - before}"
-      end
-      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
-    when :heal_fixed
-      healed = []
-      target_names.each do |tname|
-        t = state_of.call(tname)
-        next unless t && t[:hp].to_i > 0
-        before = t[:hp].to_i
-        t[:hp] = [before + skill[:value].to_i, t[:max_hp].to_i].min
-        healed << "#{tname} 건강 +#{t[:hp] - before}"
-      end
-      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
-    when :heal_area
-      healed = []
-      runner_state.each do |r|
-        next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
-        next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
-        heal = (s[:atk].to_i * skill[:ratio].to_f).ceil
-        before = r[:hp].to_i
-        r[:hp] = [before + heal, r[:max_hp].to_i].min
-        healed << "#{r[:name]} +#{r[:hp] - before}"
-      end
-      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
-    when :atk_buff_area
-      amount = (s[:atk].to_i * skill[:ratio].to_f).ceil
-      affected = []
-      runner_state.each do |r|
-        next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
-        next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
-        existing = stat_bonus(ctx, r[:name], :atk)
-        ctx[:buffs][r[:name]].reject! { |b| b[:stat] == :atk }
-        atk_bonus[r[:name]] += (amount - existing)
-        ctx[:buffs][r[:name]] << { stat: :atk, value: amount, turns: 1 }
-        affected << r[:name]
-      end
-      log << "#{name}의 강화 → #{affected.join(', ')} 마법능력 +#{amount}" if affected.any?
-    when :shield
-      applied = []
-      limit = skill[:max_targets] || target_names.size
-      target_names.first(limit).each do |tname|
-        t = state_of.call(tname)
-        next unless t
-        shields[tname] += skill[:value].to_i
-        applied << tname
-      end
-      log << "#{name}의 보호 → #{applied.join(', ')} 보호막 +#{skill[:value]}" if applied.any?
-    when :sure_hit
-      applied = []
-      target_names.each do |tname|
-        t = state_of.call(tname)
-        next unless t
-        ctx[:sure_hit][tname] = true
-        applied << tname
-      end
-      log << "#{name}의 백발백중 → #{applied.join(', ')}의 다음 공격 필중/크리티컬" if applied.any?
-    when :luck_buff
-      applied = []
-      target_names.each do |tname|
-        t = state_of.call(tname)
-        next unless t
-        luck_bonus[tname] += skill[:value].to_i
-        ctx[:buffs][tname] << { stat: :luck, value: skill[:value].to_i, turns: skill[:turns].to_i }
-        applied << tname
-      end
-      log << "#{name}의 응원 → #{applied.join(', ')} 행운 +#{skill[:value]} (#{skill[:turns]}턴)" if applied.any?
-    when :cooldown_reset
-      skill_to_reset = parts[1].to_s.strip
-      if skill_to_reset.empty?
-        log << "#{name}의 즉발 → 초기화할 스킬명 미입력 (무효)"
-      else
-        applied = []
-        target_names.each do |tname|
-          t = state_of.call(tname)
-          next unless t
-          ctx[:cooldowns][tname].delete(skill_to_reset)
-          applied << tname
-        end
-        if applied.any?
-          log << "#{name}의 즉발 → #{applied.join(', ')}의 [#{skill_to_reset}] 쿨타임 초기화"
-        else
-          log << "#{name}의 즉발 → 대상 없음 (무효)"
-        end
-      end
-    when :force_move
-      coord = parts[1].to_s.upcase
-      if target && BattleGrid.valid_pos?(coord)
-        ok, msg = BattleGrid.movable?(target[:pos], coord, runner_state, creature, actor_name: target[:name])
-        if ok
-          target[:pos] = coord
-          log << "#{display_name_of.call(name)}의 행운부여 → #{target_name}을(를) #{coord}로 이동"
-        else
-          log << "#{name}의 행운부여 실패 → #{msg}"
-        end
-      end
-    end
-  end
-
-  # 2) 방어
-  battle_actions.each do |name, act|
-    skill_name = act[:type]
-    skill = BattleSkills.get(skill_name)
-    next unless skill && BattleSkills.defense?(skill_name)
-
-    actor = state_of.call(name)
-    next unless actor && actor[:hp].to_i > 0
-    s = stats_of.call(name)
-    parts = skill_parts(act[:target])
-    target_name = normalize_target(parts[0])
-    target_name = name if target_name.empty? && skill[:range] == '자신'
-    target = state_of.call(target_name)
-
-    if skill[:once]
-      if !can_use_once?(ctx, name, skill_name)
-        log << "#{name}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
-        next
-      end
-      mark_once!(ctx, name, skill_name)
-    end
-
-    next unless cooldown_gate!(ctx, log, name, skill_name, skill)
-
-    case skill[:kind]
-    when :dur_guard
-      target_name = name if target_name.empty?
-      dur_bonus[target_name] += (stats_of.call(target_name)[:dur].to_i * 0.5).ceil
-      defended_multiplier[target_name] *= skill[:ratio].to_f
-      log << "#{name}의 방어 → #{target_name} 내구도 1.5배"
-    when :agi_buff_self
-      agi_bonus[name] += skill[:value].to_i
-      log << "#{name}의 회피 → 민첩 +#{skill[:value]}"
-    when :revenge
-      ctx[:revenge][target_name] = { by: name, multiplier: skill[:multiplier] }
-      log << "#{name}의 복수 → #{target_name} 피격 시 반격 대기"
-    when :cover
-      ctx[:cover][target_name] = name if target
-      log << "#{name}의 희생 → #{target_name} 대신 피격 대기" if target
-    when :dur_buff_area
-      amount = (s[:dur].to_i * skill[:ratio].to_f).ceil
-      affected = []
-      runner_state.each do |r|
-        next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
-        next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
-        dur_bonus[r[:name]] += amount
-        affected << r[:name]
-      end
-      log << "#{name}의 철벽 → #{affected.join(', ')} 내구도 +#{amount}" if affected.any?
-    when :agi_buff_area
-      affected = []
-      runner_state.each do |r|
-        next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
-        next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
-        agi_bonus[r[:name]] += skill[:value].to_i
-        affected << r[:name]
-      end
-      log << "#{name}의 주의분산 → #{affected.join(', ')} 민첩 +#{skill[:value]}" if affected.any?
-    when :survive_once
-      ctx[:survive_once][name] = true
-      log << "#{name}의 필사즉생 → 이번 턴 건강 0 이하 방지"
-    end
-  end
-
-  # 3) 러너 공격
-  battle_actions.each do |name, act|
-    skill_name = act[:type]
-    skill = BattleSkills.get(skill_name)
-    next unless skill && BattleSkills.attack?(skill_name)
-    next if creature[:hp].to_i <= 0
-
-    actor = state_of.call(name)
-    next unless actor && actor[:hp].to_i > 0
-    s = stats_of.call(name)
-
-    if skill[:once]
-      if !can_use_once?(ctx, name, skill_name)
-        log << "#{name}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
-        next
-      end
-      mark_once!(ctx, name, skill_name)
-    end
-
-    next unless cooldown_gate!(ctx, log, name, skill_name, skill)
-
-    sure = ctx[:sure_hit].delete(name)
-    sacrifice_attack = skill[:kind] == :sacrifice_attack
-
-    hit_detail = nil
-    evade_detail = nil
-    crit_detail = nil
-
-    log << "판정 결과"
-
-    if sure || sacrifice_attack
-      log << "명중: 자동 명중"
-    else
-      hit_detail = BattleCalculator.hit_detail(s[:tec].to_i + tec_bonus[name])
-      log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
-
-      unless hit_detail[:success]
-        log << "#{name}의 #{skill_name} → 공격 실패"
-        next
-      end
-    end
-
-    unless sure || sacrifice_attack
-      evade_detail = BattleCalculator.evade_detail(creature[:agi].to_i)
-      if evade_detail && evade_detail[:roll]
-        log << "회피 #{evade_detail[:rate]}% → #{evade_detail[:roll]} (#{evade_detail[:success] ? '회피' : '피격'})"
-      end
-
-      if evade_detail && evade_detail[:success]
-        log << "#{creature[:name]} 회피 — 피해 없음"
-        next
-      end
-    end
-
-    if sure
-      crit = true
-      log << "크리티컬: 자동 크리티컬"
-    else
-      crit_detail = BattleCalculator.critical_detail(s[:luck].to_i + luck_bonus[name])
-      crit = crit_detail[:success]
-      if crit_detail[:roll]
-        log << "크리티컬 #{crit_detail[:rate]}% → #{crit_detail[:roll]} (#{crit ? '크리티컬' : '일반'})"
-      else
-        log << "크리티컬 #{crit_detail[:rate]}% → 판정 없음 (일반)"
-      end
-    end
-
-    eff_atk = s[:atk].to_i + atk_bonus[name]
-    multiplier = skill[:multiplier] || 1.0
-
-    if skill[:kind] == :sacrifice_attack
-      parts = skill_parts(act[:target])
-      cost = parts[1].to_i
-      cost = 10 if cost <= 0
-      cost = [cost, actor[:hp].to_i - 1].min
-
-      before_hp = actor[:hp].to_i
-      actor[:hp] -= cost
-
-      bonus = cost
-      eff_atk += bonus
-
-      log << "#{display_name_of.call(name)}의 고육지책"
-      log << "#{display_name_of.call(name)} 건강 #{before_hp} → #{actor[:hp]} (소모 #{cost})"
-      log << "마법능력 +#{bonus}"
-    elsif skill[:kind] == :rush
-      parts = skill_parts(act[:target])
-      dest = parts[1].to_s.upcase
-      if BattleGrid.valid_pos?(dest)
-        dist = BattleGrid.distance(actor[:pos], dest).to_i
-        multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
-        if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
-          old_pos = actor[:pos]
-          actor[:pos] = dest
-          log << "#{display_name_of.call(name)}의 습격 이동 #{old_pos} → #{dest}"
-        end
-      end
-    end
-
-    apply_damage_to_creature(
-      log,
-      creature,
-      display_name_of.call(name),
-      skill_name,
-      eff_atk,
-      multiplier,
-      creature[:dur].to_i,
-      crit: crit,
-      guaranteed: sure
-    )
-
-    case skill[:kind]
-    when :attack_debuff
-      down = (creature[:atk].to_i * 0.2).ceil
-      before_atk = creature[:atk].to_i
-      creature[:atk] = [before_atk - down, 0].max
-      log << "#{creature[:name]} 마법능력 #{before_atk} → #{creature[:atk]}"
-    when :confusion
-      ctx[:confusion][creature[:name]] += 1
-      log << "#{creature[:name]} 혼란 #{ctx[:confusion][creature[:name]]}/5중첩"
-    end
-  end
-
-  # 4) 보스 패턴/디버프
-  boss_skill_used = false
-  if creature[:hp].to_i > 0
-    boss_skill_used = BattleBossPatterns.apply_pattern!(
-      log,
-      runner_state,
-      creature,
-      ctx,
-      stats_of: stats_of,
-      dur_bonus: dur_bonus,
-      defended_multiplier: defended_multiplier,
-      shields: shields,
-      took_damage: took_damage
-    )
-  end
-
-  # 5) 크리쳐 반격
-  # 현재스킬/이번턴스킬이 지정된 턴에는 그 스킬이 보스 행동이므로 기본 반격은 생략합니다.
-  if creature[:hp].to_i > 0 && !boss_skill_used
-    if ctx[:confusion][creature[:name]] >= 5
-      log << "#{creature[:name]}은(는) 혼란 5중첩으로 행동할 수 없습니다."
-      ctx[:confusion][creature[:name]] = 0
-    else
-      living = runner_state.select { |r| r[:hp].to_i > 0 && runner_names.include?(r[:name]) }
-      if living.any?
-        target = living.sample
-        original_target = target
-        cover_name = ctx[:cover][target[:name]]
-        cover = state_of.call(cover_name) if cover_name
-        target = cover if cover && cover[:hp].to_i > 0
-        tname = target[:name]
-        ts = stats_of.call(tname)
-
-        unless BattleCalculator.hit?(creature[:tec].to_i)
-          log << "#{creature[:name]}의 반격 → 빗나감!"
-        else
-          if BattleCalculator.evade?(ts[:agi].to_i + agi_bonus[tname])
-            log << "#{creature[:name]}의 반격 → #{display_name_of.call(tname)} 회피!"
-          else
-            crit = BattleCalculator.critical?(creature[:luck].to_i)
-            base = crit ? creature[:atk].to_i * 2 : creature[:atk].to_i
-            eff_dur = (ts[:dur].to_i + dur_bonus[tname]) * defended_multiplier[tname]
-
-            if ts[:house].to_s.strip == '그리핀도르' && ts[:passive] == '1' &&
-               BattleCalculator.in_front?(target[:pos], creature[:pos], ts[:facing].to_s)
-              eff_dur = (eff_dur * 1.5).ceil
-              log << "#{display_name_of.call(tname)}: [그리핀도르] 공격자가 정면에 위치 — 내구도 1.5배"
-            end
-
-            dmg = BattleCalculator.calc_damage(base, eff_dur.to_i)
-
-            if shields[tname].to_i > 0 && dmg > 0
-              blocked = [shields[tname], dmg].min
-              shields[tname] -= blocked
-              dmg -= blocked
-              log << "#{display_name_of.call(tname)} 보호막 #{blocked} 흡수"
-            end
-
-            if ctx[:survive_once][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
-              dmg = target[:hp].to_i - 1
-              ctx[:survive_once].delete(tname)
-              log << "#{display_name_of.call(tname)}: 필사즉생으로 건강 0 이하 방지"
-            elsif ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
-                  !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
-              dmg = target[:hp].to_i - 1
-              ctx[:guard_used][tname] = true
-              log << "#{display_name_of.call(tname)}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
-            end
-
-            target[:hp] = [target[:hp].to_i - dmg, 0].max
-            took_damage[tname] = true if dmg > 0
-            line = "#{creature[:name]}의 반격 → #{display_name_of.call(tname)}에게 #{dmg} 피해#{crit ? ' (크리티컬!)' : ''}"
-            line += " (#{display_name_of.call(original_target[:name])} 대신 피격)" if original_target != target
-            log << line
-
-            if ctx[:revenge][tname] && dmg > 0
-              rev_by = ctx[:revenge][tname][:by]
-              rev_actor = state_of.call(rev_by)
-              rev_stats = stats_of.call(rev_by)
-              if rev_actor && rev_actor[:hp].to_i > 0
-                rev_dmg = BattleCalculator.calc_damage((dmg * ctx[:revenge][tname][:multiplier]).ceil, creature[:dur].to_i)
-                creature[:hp] = [creature[:hp].to_i - rev_dmg, 0].max
-                log << "#{display_name_of.call(rev_by)}의 복수 → #{creature[:name]}에게 #{rev_dmg} 반격 피해"
-              end
-            end
-
-            if target[:hp] <= 0
-              target[:status] = '전투불가'
-              log << "#{display_name_of.call(tname)} 전투불가"
-            end
-          end
-        end
-      end
-    end
-  end
-
-  runner_names.each do |name|
-    s = stats_of.call(name)
-    if s[:house].to_s.strip == '슬리데린' && s[:passive] == '2' && battle_actions[name].nil?
-      st = state_of.call(name)
-      if st && st[:hp].to_i > 0
-        ctx[:slytherin_luck][name] += 10
-        log << "#{display_name_of.call(name)}: [슬리데린] 행동을 포기하고 상황을 살핍니다. (다음 라운드부터 행운 +10)"
-      end
-    end
-  end
-
-  ctx[:prev_took_damage] = took_damage
-  battle_actions.each { |name, act| ctx[:prev_action][name] = act[:type] }
-  cleanup_buffs!(ctx)
-  advance_cooldowns!(ctx)
-  ctx[:cover] = {}
-  ctx[:revenge] = {}
-  ctx[:sure_hit] = {}
-  ctx[:survive_once] = {}
-
-  view_sheet.update_runner_state(runner_state)
-  [log, runner_state, nil]
-end
-
-def action_text_for_result(name, action, creature_name)
-  return "#{name}: 턴 상실" unless action
-
-  type = action[:type].to_s
-  target = action[:target].to_s
-
-  if type == '이동'
-    from = action[:from].to_s
-    to = action[:to].to_s.empty? ? target : action[:to].to_s
-    return "#{name}: 이동 #{from} → #{to}" unless from.empty?
-    return "#{name}: 이동 #{to}"
-  end
-
-  target = creature_name if ['크리쳐', creature_name].include?(target)
-  "#{name}: #{type} (#{target})"
-end
-
-def build_result_text(runner_tags, battle_round, creature, battle_actions, runner_names, log, runner_state, view_sheet, timeout: false)
-  creature_name   = creature[:name].to_s.strip.empty? ? '크리쳐' : creature[:name].to_s.strip
-  creature_hp     = creature[:hp].to_i
-  creature_max_hp = (creature[:max_hp] || creature_hp).to_i
-
-  title = timeout ? "[#{battle_round}라운드] #{creature_name} 전투 결과 (시간 초과)" : "[#{battle_round}라운드] #{creature_name} 전투 결과"
-
-  base_stats = view_sheet.read_base_stats rescue []
-
-  runner_state.each do |r|
-    stat = base_stats.find { |s| s[:id].to_s == r[:name].to_s }
-    next unless stat
-
-    label = stat[:display_name].to_s.strip
-    r[:display_name] = label unless label.empty?
-  end
-
 
   begin
-    stats = view_sheet.read_base_stats
-    puts "[DEBUG] base_stats=#{stats.size}"
-
-    runner_names.each do |id|
-      row = stats.find { |s|
-        s[:id].to_s == id.to_s ||
-        s[:name].to_s == id.to_s
-      }
-
-      puts "[DEBUG] #{id} => #{row.inspect}"
-    end
+    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}", last_post_time)
+    new_time
   rescue => e
-    puts "[DEBUG] read_base_stats ERROR #{e.class}: #{e.message}"
+    puts "[전투봇] [세션 #{session.id}] 처치 보상 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
+  end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 처치 보상 지급 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
+
+def announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+  return last_post_time unless scout_sheet
+
+  lines = []
+  session.runner_names.each do |acct|
+    text = ScoutDirections.build_announcement(scout_sheet, scout_grid_sheet, acct)
+    next unless text
+
+    lines << "@#{acct}"
+    lines << text
+    lines << ''
   end
 
+  return last_post_time if lines.empty?
 
-  # 1툿: 행동 + 전장
-  part1 = "#{runner_tags}
-
-#{title}
-
-"
-  part1 += "────────────────────
-"
-  part1 += "행동
-"
-
-  runner_names.each do |name|
-    runner = runner_state.find { |r| r[:name].to_s == name.to_s }
-    label = runner && runner[:display_name].to_s.strip
-    label = name if label.nil? || label.empty?
-
-    part1 += "#{action_text_for_result(label, battle_actions[name], creature_name)}
-"
+  begin
+    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}".strip, last_post_time)
+    new_time
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
   end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
 
-  moved = battle_actions.select { |_name, act| act && act[:type].to_s == '이동' && !act[:from].to_s.empty? }
-  if moved.any?
-    part1 += "
-이동
-"
-    moved.each do |name, act|
-      runner = runner_state.find { |r| r[:name].to_s == name.to_s }
-      label = runner && runner[:display_name].to_s.strip
-      label = name if label.nil? || label.empty?
-      part1 += "#{label}: #{act[:from]} → #{act[:to]}
-"
+def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet = nil, scout_grid_sheet = nil)
+  return [last_post_time, false] unless session.active
+  return [last_post_time, false] unless session.phase == :battle
+
+  required = session.required_actions
+  round_done = required > 0 && session.actions.size >= required
+  round_timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
+  return [last_post_time, false] unless round_done || round_timeout
+
+  session.passive_ctx[:round] = session.round.to_i
+  begin
+    log, runner_state, escape_result = settle_round(
+      session.actions,
+      session.runner_names,
+      runner_sheet,
+      creature_sheet,
+      view_sheet,
+      session.creature,
+      session.passive_ctx
+    )
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 정산 실패: #{e.class}: #{e.message}"
+    puts e.backtrace.first(5)
+    sheet_log(creature_sheet, session.id, session.round, '정산 실패',
+              "#{e.class}: #{e.message}\n#{Array(e.backtrace).first(5).join("\n")}\n보스행동커맨드 입력 시 다음 라운드로 진행됩니다.")
+    session.round += 1
+    session.phase = :boss_command
+    session.awaiting_boss = true
+    session.announced = false
+    session.actions = {}
+    session.processed_messages = {}
+    session.start_time = Time.now
+    session.auto_next_round_timer = nil
+    begin
+      response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n[안내] 라운드 정산 중 오류가 발생했습니다. 운영 계정이 보스 행동을 입력하면 다음 라운드로 진행됩니다.", last_post_time)
+      last_post_time = new_time
+    rescue => post_err
+      puts "[전투봇] [세션 #{session.id}] 정산 실패 안내 송출 실패: #{post_err.class}: #{post_err.message}"
     end
+    return [last_post_time, false]
   end
 
-  part1 += "────────────────────
-"
-  part1 += "전장
+  # 도망가기/말걸기 성공 → 파티 전체 전투 즉시 종료
+  if escape_result
+    session.active = false
+    session.auto_next_round_timer = nil
+    session.awaiting_boss = false
 
-"
-  BattleGrid.render(runner_state, creature).each { |line| part1 += "#{line}
-" }
+    reason_label = escape_result[:type] == :fled ? '도망 성공' : '말걸기 성공'
+    text = "#{session.runner_tags}\n\n[#{session.round}라운드] #{reason_label}\n\n" \
+           "#{Array(log).join("\n")}"
 
-  # 2툿: 전투 로그 + 상태
-  part2 = "#{title} - 결과
+    response, new_time = post_session_thread(session, text, last_post_time)
+    last_post_time = new_time
 
-"
-  part2 += "전투 로그
-"
+    sheet_log(creature_sheet, session.id, session.round, '전투 종결', "#{reason_label} - #{escape_result[:name]}")
+    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{reason_label})"
 
-  log.each do |line|
-    pretty = line.to_s
-    if pretty.include?('→')
-      part2 += "▶ #{pretty}
-"
-    else
-      part2 += "#{pretty}
-"
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+    return [last_post_time, true]
+  end
+
+  result = build_result_text(
+    session.runner_tags,
+    session.round,
+    session.creature,
+    session.actions,
+    session.runner_names,
+    log,
+    runner_state,
+    view_sheet,
+    timeout: round_timeout && !round_done
+  )
+
+  Array(result).each do |part|
+    response, new_time = post_session_thread(session, part, last_post_time)
+    last_post_time = new_time
+  end
+
+  dead = runner_state.select { |r| session.runner_names.include?(r[:name].to_s) && r[:hp].to_i <= 0 }.map { |r| r[:name].to_s }
+  session.mark_dead_runners(dead)
+
+  creature_dead = session.creature[:hp].to_i <= 0
+  all_runners_dead = runner_state.none? { |r| session.runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
+
+  ctx = session.passive_ctx
+  positions = (ctx[:positions] ||= {})
+
+  actions_text = session.actions.map { |name, act| "#{name}: [#{act[:type]}/#{act[:target]}]" }.join(' / ')
+  sheet_log(creature_sheet, session.id, session.round, '정산',
+            "행동: #{actions_text.empty? ? '없음' : actions_text}\n\n#{Array(log).join("\n")}")
+
+  if creature_dead || all_runners_dead
+    session.active = false
+    session.auto_next_round_timer = nil
+    session.awaiting_boss = false
+    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
+    sheet_log(creature_sheet, session.id, session.round, '전투 종결', creature_dead ? '크리쳐 격파 - 승리' : '전원 전투불가 - 패배')
+
+    if creature_dead
+      last_post_time = award_victory_credits!(session, scout_sheet, last_post_time)
     end
-  end
 
-  part2 += "────────────────────
-"
-  part2 += "상태
-"
-
-  runner_state.select { |r| runner_names.include?(r[:name]) }.each do |r|
-    status_text = r[:status].to_s.strip
-    status_text = " / #{status_text}" unless status_text.empty?
-    part2 += "#{r[:display_name].to_s.empty? ? r[:name] : r[:display_name]}
-"
-    part2 += "#{view_sheet.health_bar(r[:hp], r[:max_hp])} / 위치 #{r[:pos]}#{status_text}
-
-"
-  end
-
-  part2 += "#{creature_name}
-"
-  part2 += "#{view_sheet.health_bar(creature_hp, creature_max_hp)} (방향: #{creature[:facing] || '하'})
-"
-  part2 += "점유칸: #{BattleGrid.occupied_cells_label(creature)}
-"
-  part2 += "
-"
-
-  if creature_hp <= 0
-    part2 += "#{creature_name} 격파! 전투 승리!"
-  elsif runner_state.none? { |r| runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
-    part2 += "전원 전투 불능. 전투 패배."
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+    [last_post_time, true]
   else
-    part2 += "#{ROUND_WAIT_SECONDS}초 후 다음 라운드가 시작됩니다."
+    session.round += 1
+    session.phase = :boss_command
+    session.awaiting_boss = true
+    session.announced = false
+    session.actions = {}
+    session.processed_messages = {}
+    session.start_time = Time.now
+    session.auto_next_round_timer = nil
+    
+    if session.auto_mode
+      auto_skill = select_auto_skill(session.creature, creature_sheet)
+      if auto_skill
+        session.passive_ctx[:boss_override] = { skill: auto_skill }
+        session.awaiting_boss = false
+        session.phase = :announcing
+      end
+    end
+    
+    puts "[전투봇] [세션 #{session.id}] #{session.round - 1}라운드 정산 완료 - #{session.round}라운드 보스행동커맨드 대기"
+    [last_post_time, false]
+  end
+end
+
+def select_auto_skill(creature, creature_sheet)
+  return nil unless creature && creature_sheet
+  begin
+    rows = creature_sheet.read("'보스스킬'!A2:A")
+    names = rows.map { |r| r[0].to_s.strip }.reject(&:empty?)
+    return nil if names.empty?
+    names.sample
+  rescue => e
+    puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
+    nil
+  end
+end
+
+fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
+snapshot_current_dm_ids(processed_dm_ids)
+snapshot_current_notification_ids(processed_notification_ids)
+puts '[전투봇] 기존 툿/DM/멘션 스냅샷 완료 (재발동 방지)'
+
+bot_on = false
+last_trigger_check = Time.at(0)
+
+loop do
+  begin
+    if (Time.now - last_trigger_check) >= TRIGGER_CHECK_INTERVAL
+      new_bot_on = $trigger_sheet.read_bot_on_or_nil
+      new_bot_on = bot_on if new_bot_on.nil?
+      last_trigger_check = Time.now
+
+      if new_bot_on && !bot_on
+        fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
+        snapshot_current_dm_ids(processed_dm_ids)
+        snapshot_current_notification_ids(processed_notification_ids)
+        puts '[전투봇] 전투봇 켜짐 (실행 탭 A2 체크)'
+      elsif !new_bot_on && bot_on
+        puts '[전투봇] 전투봇 꺼짐 (실행 탭 A2 해제)'
+      end
+
+      bot_on = new_bot_on
+    end
+
+    unless bot_on
+      sleep(3)
+      next
+    end
+
+    sessions.values.each { |session| check_prep_completion(session, creature_sheet) }
+
+    sessions.values.each do |session|
+      next unless session.auto_next_round_timer
+      next unless (Time.now - session.auto_next_round_timer) >= ROUND_WAIT_SECONDS
+
+      session.reset_for_next_round!
+      snapshot_current_dm_ids(processed_dm_ids)
+      snapshot_current_notification_ids(processed_notification_ids)
+      puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 자동 시작"
+    end
+
+    conversations = fetch_conversations
+
+    conversations.each do |conv|
+      last_status = conv['last_status']
+      next unless last_status
+
+      sender = last_status['account'] || conv['accounts'].to_a.first
+      next unless sender
+
+      dm_id = last_status['id']
+      next if processed_dm_ids.include?(dm_id)
+
+      username = sender['username'].to_s.gsub('@', '').strip
+      content = clean_html(last_status['content'])
+
+      if battle_start_text?(content)
+        if sessions.key?(last_status['id'])
+          processed_dm_ids.add(dm_id)
+          next
+        end
+        session = create_battle_session_from_status(last_status, content, :dm, creature_sheet, BOT_USERNAME, username)
+        if session
+          sessions[session.id] = session
+          auto_enabled = $trigger_sheet.read_auto_mode
+          session.auto_mode = auto_enabled if auto_enabled
+          puts "[전투봇] [세션 #{session.id}] DM 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+          sheet_log(creature_sheet, session.id, session.round, '전투 시작', "DM / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+        end
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if battle_end_text?(content)
+        target = find_session_for_action(sessions, username, last_status)
+        target ||= sessions.values.select(&:active).max_by(&:start_time)
+        if target
+          target.active = false
+          target.auto_next_round_timer = nil
+          response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
+          last_post_time = new_time
+          puts "[전투봇] [세션 #{target.id}] DM 전투 중단"
+          sheet_log(creature_sheet, target.id, target.round, '전투 중단', "@#{username} 의 종료 명령")
+        end
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      boss_sid = last_status['id'].to_s
+      if handled_boss_status_ids.include?(boss_sid)
+        processed_dm_ids.add(dm_id)
+        next
+      end
+      handled_boss_status_ids.add(boss_sid)
+      case try_boss_command!(sessions, username, last_status, content, creature_sheet, quiet_hold: held_boss_logged_ids.include?(boss_sid))
+      when :applied, :ignored
+        processed_dm_ids.add(dm_id)
+        next
+      when :hold
+        handled_boss_status_ids.delete(boss_sid)
+        held_boss_logged_ids.add(boss_sid)
+        next
+      end
+      handled_boss_status_ids.delete(boss_sid)
+
+      if bot_status?(last_status, BOT_USERNAME)
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      session = find_session_for_action(sessions, username, last_status)
+      unless session
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if session.phase == :prep
+        handle_prep_input(session, username, content, processed_dm_ids, dm_id, listener, processed_action_status_ids, last_status['id'])
+        next
+      end
+
+      unless session.phase == :battle
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      process_action_for_session(session, username, content, processed_dm_ids, dm_id, runner_sheet, view_sheet, listener, processed_action_status_ids, dm_id)
+    end
+
+    fetch_public_statuses.each do |status|
+      status_id = status['id']
+      next if processed_statuses.include?(status_id)
+
+      content = clean_html(status['content'])
+
+      if battle_start_text?(content)
+        if sessions.key?(status_id)
+          processed_statuses.add(status_id)
+          next
+        end
+        session = create_battle_session_from_status(status, content, :public, creature_sheet, BOT_USERNAME, nil)
+        if session
+          sessions[session.id] = session
+          auto_enabled = $trigger_sheet.read_auto_mode
+          session.auto_mode = auto_enabled if auto_enabled
+          puts "[전투봇] [세션 #{session.id}] 공개 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+          sheet_log(creature_sheet, session.id, session.round, '전투 시작', "공개 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+        else
+          listener.post_public('[전투 오류] 참여자가 없습니다. 태그를 추가하세요.')
+          puts '[전투봇] 태그된 러너 없음'
+        end
+        processed_statuses.add(status_id)
+        next
+      end
+
+      pub_sender = status.dig('account', 'username').to_s
+      boss_sid = status_id.to_s
+      if handled_boss_status_ids.include?(boss_sid)
+        processed_statuses.add(status_id)
+        next
+      end
+      handled_boss_status_ids.add(boss_sid)
+      case try_boss_command!(sessions, pub_sender, status, content, creature_sheet, quiet_hold: held_boss_logged_ids.include?(boss_sid))
+      when :applied, :ignored
+        processed_statuses.add(status_id)
+        next
+      when :hold
+        handled_boss_status_ids.delete(boss_sid)
+        held_boss_logged_ids.add(boss_sid)
+        next
+      end
+      handled_boss_status_ids.delete(boss_sid)
+
+      if battle_end_text?(content)
+        end_sid = status_id.to_s
+
+        if handled_battle_end_status_ids.include?(end_sid)
+          processed_statuses.add(status_id)
+          next
+        end
+
+        active_sessions = sessions.values.select(&:active)
+        target = active_sessions.find { |s| s.related_to_status?(status) }
+
+        target ||= active_sessions.first if active_sessions.length == 1
+
+        if target
+          target.active = false
+          target.auto_next_round_timer = nil
+          target.awaiting_boss = false
+          handled_battle_end_status_ids.add(end_sid)
+
+          response, new_time = post_session_thread(target, '[전투 중단]', last_post_time)
+          last_post_time = new_time
+          puts "[전투봇] [세션 #{target.id}] 공개 전투 중단"
+          sheet_log(
+            creature_sheet,
+            target.id,
+            target.round,
+            '전투 중단',
+            "공개 툿 종료 명령 / status=#{end_sid}"
+          )
+        else
+          puts "[전투봇] 공개 종료 명령 무시: 연결 세션 불명확 status=#{end_sid}"
+          sheet_log(
+            creature_sheet,
+            '-',
+            '-',
+            '전투 종료 명령 무시',
+            "공개 종료 명령의 연결 세션 불명확 / status=#{end_sid}"
+          )
+        end
+      end
+
+      processed_statuses.add(status_id)
+    end
+
+    sessions.values.select(&:active).each do |session|
+      if session.phase == :prep && !session.announced
+        last_post_time = announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessions: sessions)
+      elsif session.phase == :announcing
+        last_post_time = announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_time)
+      elsif session.phase == :boss_command && !session.announced
+        last_post_time = announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
+      end
+    end
+
+    fetch_notifications.each do |notification|
+      notification_id = notification['id']
+      next if processed_notification_ids.include?(notification_id)
+
+      status = notification['status']
+      unless status
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if bot_status?(status, BOT_USERNAME)
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      username = notification.dig('account', 'username').to_s.gsub('@', '').strip
+      text = clean_html(status['content'])
+
+      boss_sid = status['id'].to_s
+      if handled_boss_status_ids.include?(boss_sid)
+        processed_notification_ids.add(notification_id)
+        next
+      end
+      handled_boss_status_ids.add(boss_sid)
+      case try_boss_command!(sessions, username, status, text, creature_sheet, quiet_hold: held_boss_logged_ids.include?(boss_sid))
+      when :applied, :ignored
+        processed_notification_ids.add(notification_id)
+        next
+      when :hold
+        handled_boss_status_ids.delete(boss_sid)
+        held_boss_logged_ids.add(boss_sid)
+        next
+      end
+      handled_boss_status_ids.delete(boss_sid)
+
+      if battle_start_text?(text)
+        if sessions.key?(status['id'])
+          processed_notification_ids.add(notification_id)
+          next
+        end
+        session = create_battle_session_from_status(status, text, :mention, creature_sheet, BOT_USERNAME, username)
+        if session
+          sessions[session.id] = session
+          processed_statuses.add(status['id'])
+          auto_enabled = $trigger_sheet.read_auto_mode
+          session.auto_mode = auto_enabled if auto_enabled
+          puts "[전투봇] [세션 #{session.id}] 멘션 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+          sheet_log(creature_sheet, session.id, session.round, '전투 시작', "멘션 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+        else
+          puts "[전투봇] 멘션 전투시작 실패: 참여자 없음 또는 파싱 실패 (@#{username})"
+        end
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if battle_end_text?(text)
+        end_sid = status['id'].to_s
+
+        if handled_battle_end_status_ids.include?(end_sid)
+          processed_notification_ids.add(notification_id)
+          processed_statuses.add(status['id']) if status['id']
+          next
+        end
+
+        active_sessions = sessions.values.select(&:active)
+
+        target = active_sessions.find { |s| s.related_to_status?(status) }
+
+        if target.nil?
+          runner_sessions = active_sessions.select do |session|
+            session.includes_runner?(username)
+          end
+
+          target = runner_sessions.first if runner_sessions.length == 1
+        end
+
+        target ||= active_sessions.first if active_sessions.length == 1
+
+        if target
+          target.active = false
+          target.auto_next_round_timer = nil
+          target.awaiting_boss = false
+          handled_battle_end_status_ids.add(end_sid)
+
+          response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
+          last_post_time = new_time
+
+          puts "[전투봇] [세션 #{target.id}] 멘션 전투 중단 / status=#{end_sid}"
+          sheet_log(
+            creature_sheet,
+            target.id,
+            target.round,
+            '전투 중단',
+            "@#{username} 의 종료 명령 / status=#{end_sid}"
+          )
+        else
+          puts "[전투봇] 멘션 종료 명령 무시: 연결 세션 불명확 @#{username} status=#{end_sid}"
+          sheet_log(
+            creature_sheet,
+            '-',
+            '-',
+            '전투 종료 명령 무시',
+            "@#{username} / 연결 세션 불명확 / status=#{end_sid}"
+          )
+        end
+
+        processed_statuses.add(status['id']) if status['id']
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      session = find_session_for_action(sessions, username, status)
+      unless session
+        puts "[전투봇] 멘션 무시: 참여 중인 활성 세션 없음 @#{username}"
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if session.phase == :prep
+        handle_prep_input(session, username, text, processed_notification_ids, notification_id, listener, processed_action_status_ids, status['id'])
+        next
+      end
+
+      unless session.phase == :battle
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      process_action_for_session(session, username, text, processed_notification_ids, notification_id, runner_sheet, view_sheet, listener, processed_action_status_ids, status['id'])
+    end
+
+    sessions.values.each do |session|
+      last_post_time, _ = settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet, scout_grid_sheet)
+    end
+
+    sessions.delete_if { |_id, session| session.finished? }
+
+  rescue => e
+    puts "[전투봇 오류] #{e.class}: #{e.message}"
+    puts e.backtrace.first(5)
+    sheet_log(creature_sheet, '-', '-', '오류',
+              "#{e.class}: #{e.message}\n#{Array(e.backtrace).first(5).join("\n")}")
   end
 
-  [part1, part2]
+  sleep(3)
 end
