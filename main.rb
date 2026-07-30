@@ -21,6 +21,7 @@ require_relative 'battle_skills'
 require_relative 'battle_boss_patterns'
 require_relative 'battle_round'
 require_relative 'battle_session'
+require_relative 'scout_directions'
 
 RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
 CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
@@ -28,6 +29,11 @@ VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
 TRIGGER_SHEET_ID  = '1FIvnRTLlcDmx29TShi7XnX9uGYuEc-YC63B9b4Z1IHE'
 CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
 BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
+
+# 도망가기/말걸기 성공, 승리, 패배 후 조사맵 이동 가능 방향을 보여주기 위한
+# 조사봇(TH3V151T0R5_F) 시트. 설정하지 않으면 방향 안내를 생략한다.
+SCOUT_SHEET_ID      = ENV['SCOUT_SHEET_ID']
+SCOUT_GRID_SHEET_ID = ENV['SCOUT_GRID_SHEET_ID']
 
 ROUND_WAIT_SECONDS = 60
 ACTION_WAIT_SECONDS = 300
@@ -46,6 +52,9 @@ runner_sheet   = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
 creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
 view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
 listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
+
+scout_sheet      = SCOUT_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_SHEET_ID, CREDENTIALS_PATH)
+scout_grid_sheet = SCOUT_GRID_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_GRID_SHEET_ID, CREDENTIALS_PATH)
 
 $trigger_sheet = SheetManager.new(TRIGGER_SHEET_ID, CREDENTIALS_PATH)
 
@@ -583,7 +592,65 @@ def process_action_for_session(session, username, text, processed_set, processed
   changed
 end
 
-def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time)
+def award_victory_credits!(session, scout_sheet, last_post_time)
+  return last_post_time unless scout_sheet
+
+  reward = session.creature[:reward].to_i
+  return last_post_time if reward <= 0
+
+  creature_name = session.creature[:name].to_s.strip
+  creature_name = '크리쳐' if creature_name.empty?
+
+  lines = ["[보상] #{creature_name} 처치 — 크레딧 +#{reward}"]
+  session.runner_names.each do |acct|
+    new_total = ScoutDirections.add_credits(scout_sheet, acct, reward)
+    lines << if new_total
+               "@#{acct} 보유 크레딧: #{new_total}"
+             else
+               "@#{acct} 크레딧 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
+             end
+  end
+
+  begin
+    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}", last_post_time)
+    new_time
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] 처치 보상 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
+  end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 처치 보상 지급 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
+
+def announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+  return last_post_time unless scout_sheet
+
+  lines = []
+  session.runner_names.each do |acct|
+    text = ScoutDirections.build_announcement(scout_sheet, scout_grid_sheet, acct)
+    next unless text
+
+    lines << "@#{acct}"
+    lines << text
+    lines << ''
+  end
+
+  return last_post_time if lines.empty?
+
+  begin
+    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}".strip, last_post_time)
+    new_time
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
+  end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
+
+def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet = nil, scout_grid_sheet = nil)
   return [last_post_time, false] unless session.active
   return [last_post_time, false] unless session.phase == :battle
 
@@ -594,7 +661,7 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
 
   session.passive_ctx[:round] = session.round.to_i
   begin
-    log, runner_state = settle_round(
+    log, runner_state, escape_result = settle_round(
       session.actions,
       session.runner_names,
       runner_sheet,
@@ -623,6 +690,26 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
       puts "[전투봇] [세션 #{session.id}] 정산 실패 안내 송출 실패: #{post_err.class}: #{post_err.message}"
     end
     return [last_post_time, false]
+  end
+
+  # 도망가기/말걸기 성공 → 파티 전체 전투 즉시 종료
+  if escape_result
+    session.active = false
+    session.auto_next_round_timer = nil
+    session.awaiting_boss = false
+
+    reason_label = escape_result[:type] == :fled ? '도망 성공' : '말걸기 성공'
+    text = "#{session.runner_tags}\n\n[#{session.round}라운드] #{reason_label}\n\n" \
+           "#{Array(log).join("\n")}"
+
+    response, new_time = post_session_thread(session, text, last_post_time)
+    last_post_time = new_time
+
+    sheet_log(creature_sheet, session.id, session.round, '전투 종결', "#{reason_label} - #{escape_result[:name]}")
+    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{reason_label})"
+
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+    return [last_post_time, true]
   end
 
   result = build_result_text(
@@ -661,6 +748,12 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     session.awaiting_boss = false
     puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
     sheet_log(creature_sheet, session.id, session.round, '전투 종결', creature_dead ? '크리쳐 격파 - 승리' : '전원 전투불가 - 패배')
+
+    if creature_dead
+      last_post_time = award_victory_credits!(session, scout_sheet, last_post_time)
+    end
+
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
     [last_post_time, true]
   else
     session.round += 1
@@ -1061,7 +1154,7 @@ loop do
     end
 
     sessions.values.each do |session|
-      last_post_time, _ = settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time)
+      last_post_time, _ = settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet, scout_grid_sheet)
     end
 
     sessions.delete_if { |_id, session| session.finished? }
