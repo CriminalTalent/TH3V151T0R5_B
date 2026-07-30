@@ -33,9 +33,6 @@ module BattleSkills
     '주의분산' => { category: '방어', range: '근접', cooldown: 2, kind: :agi_buff_area, value: 15 },
     '필사즉생' => { category: '방어', range: '-', once: true, kind: :survive_once },
 
-    '도망가기' => { category: '이탈', range: '-', cooldown: 0, kind: :flee },
-    '말걸기' => { category: '이탈', range: '-', cooldown: 0, kind: :talk },
-
     '물약사용' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 }
   }.freeze
 
@@ -67,10 +64,6 @@ module BattleSkills
 
   def defense?(name)
     category(name) == '방어'
-  end
-
-  def escape?(name)
-    category(name) == '이탈'
   end
 
   def cooldown_text(name)
