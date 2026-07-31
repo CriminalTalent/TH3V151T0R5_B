@@ -635,14 +635,7 @@ def announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post
   directions_text = ScoutDirections.build_announcement(scout_sheet, scout_grid_sheet, representative)
   return last_post_time unless directions_text
 
-  party_tags = session.runner_names.map { |acct| "@#{acct}" }.join(' ')
-
-  # 각 방향 명령 뒤에 파티 전원 멘션을 붙여, 그대로 답장하면 다같이 이동하도록 한다.
-  lines = directions_text.split("\n").map do |line|
-    line.start_with?('[탐사/') ? "#{line} #{party_tags}" : line
-  end
-
-  text = "#{session.runner_tags}\n\n#{lines.join("\n")}"
+  text = "#{session.runner_tags}\n\n#{directions_text}"
 
   begin
     response, new_time = post_session_thread(session, text, last_post_time)
