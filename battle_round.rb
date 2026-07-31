@@ -94,7 +94,7 @@ end
 def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, view_sheet, creature, ctx)
   runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
   base_stats   = runner_sheet.read_base_stats
-  stats_of = ->(name) { base_stats.find { |s| s[:name].to_s == name.to_s } || {} }
+  stats_of = ->(name) { base_stats.find { |s| s[:name].to_s.casecmp?(name.to_s) } || {} }
   state_of = ->(name) { runner_state.find { |r| r[:name].to_s == name.to_s } }
 
   # 스탯 시트의 캐릭터명과 준비 라운드에서 입력한 실제 위치를
@@ -657,7 +657,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   base_stats = view_sheet.read_base_stats rescue []
 
   runner_state.each do |r|
-    stat = base_stats.find { |s| s[:id].to_s == r[:name].to_s }
+    stat = base_stats.find { |s| s[:id].to_s.casecmp?(r[:name].to_s) }
     next unless stat
 
     label = stat[:display_name].to_s.strip
