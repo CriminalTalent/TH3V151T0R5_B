@@ -335,7 +335,7 @@ def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold
       base_stats = []
     end
     state.each do |r|
-      stat = base_stats.find { |b| b[:name].to_s == r[:name].to_s }
+      stat = base_stats.find { |b| b[:name].to_s.casecmp?(r[:name].to_s) }
       label = stat ? stat[:display_name].to_s.strip : ''
       r[:display_name] = label.empty? ? r[:name].to_s : label
     end
@@ -393,7 +393,7 @@ def announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
   state.each do |r|
     pos = positions[r[:name].to_s].to_s.upcase
     r[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
-    stat = base_stats.find { |b| b[:name].to_s == r[:name].to_s }
+    stat = base_stats.find { |b| b[:name].to_s.casecmp?(r[:name].to_s) }
     label = stat ? stat[:display_name].to_s.strip : ''
     r[:display_name] = label.empty? ? r[:name].to_s : label
   end
@@ -438,7 +438,7 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
   state.each do |r|
     pos = positions[r[:name].to_s].to_s.upcase
     r[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
-    stat = base_stats.find { |b| b[:name].to_s == r[:name].to_s }
+    stat = base_stats.find { |b| b[:name].to_s.casecmp?(r[:name].to_s) }
     label = stat ? stat[:display_name].to_s.strip : ''
     r[:display_name] = label.empty? ? r[:name].to_s : label
   end
@@ -626,20 +626,26 @@ end
 def announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
   return last_post_time unless scout_sheet
 
-  lines = []
-  session.runner_names.each do |acct|
-    text = ScoutDirections.build_announcement(scout_sheet, scout_grid_sheet, acct)
-    next unless text
+  # 전투 참가자 전원이 같은 격자 칸에서 조우했다고 보고, 대표 계정 하나의
+  # 좌표로 방향을 계산한 뒤 파티 전체에게 한 번에 안내한다.
+  # (개인별로 따로 안내하면 각자 다른 방향으로 흩어질 수 있어 파티 단위로 통일)
+  representative = session.runner_names.first
+  return last_post_time unless representative
 
-    lines << "@#{acct}"
-    lines << text
-    lines << ''
+  directions_text = ScoutDirections.build_announcement(scout_sheet, scout_grid_sheet, representative)
+  return last_post_time unless directions_text
+
+  party_tags = session.runner_names.map { |acct| "@#{acct}" }.join(' ')
+
+  # 각 방향 명령 뒤에 파티 전원 멘션을 붙여, 그대로 답장하면 다같이 이동하도록 한다.
+  lines = directions_text.split("\n").map do |line|
+    line.start_with?('[탐사/') ? "#{line} #{party_tags}" : line
   end
 
-  return last_post_time if lines.empty?
+  text = "#{session.runner_tags}\n\n#{lines.join("\n")}"
 
   begin
-    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}".strip, last_post_time)
+    response, new_time = post_session_thread(session, text, last_post_time)
     new_time
   rescue => e
     puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
