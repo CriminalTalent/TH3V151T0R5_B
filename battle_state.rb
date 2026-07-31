@@ -265,7 +265,7 @@ def build_fallback_runner_state(runner_names, runner_sheet, default_pos)
   base_stats = runner_sheet.read_base_stats
 
   runner_names.map do |name|
-    stat = base_stats.find { |s| s[:name].to_s == name.to_s || s[:id].to_s == name.to_s }
+    stat = base_stats.find { |s| s[:name].to_s.casecmp?(name.to_s) || s[:id].to_s.casecmp?(name.to_s) }
     hp = stat ? [stat[:hp].to_i, 0].max : 50
     max_hp = stat && stat[:max_hp].to_i > 0 ? stat[:max_hp].to_i : hp
 
