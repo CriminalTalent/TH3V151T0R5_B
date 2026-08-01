@@ -315,6 +315,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         ok, msg = BattleGrid.movable?(target[:pos], coord, runner_state, creature, actor_name: target[:name])
         if ok
           target[:pos] = coord
+          (ctx[:positions] ||= {})[target_name.to_s] = coord
           log << "#{display_name_of.call(name)}의 행운부여 → #{target_name}을(를) #{coord}로 이동"
         else
           log << "#{name}의 행운부여 실패 → #{msg}"
@@ -481,6 +482,10 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
           old_pos = actor[:pos]
           actor[:pos] = dest
+          # 습격으로 이동한 위치를 준비 라운드/이동 스킬과 동일하게
+          # ctx[:positions]에도 반영합니다. 이걸 빠뜨리면 다음 라운드
+          # 정산 시작 시 위치가 습격 이전 좌표로 되돌아갑니다.
+          (ctx[:positions] ||= {})[name.to_s] = dest
           log << "#{display_name_of.call(name)}의 습격 이동 #{old_pos} → #{dest}"
         end
       end
