@@ -17,6 +17,47 @@ class SheetManager
   end
 
   # ──────────────────────────────────────────────
+  # 재시도 헬퍼
+  #
+  # 타임아웃/일시적 서버 오류(execution expired, Server error 등)에 대해
+  # 짧게 대기 후 최대 2회 더 재시도한다. 재시도까지 실패하면 호출부의
+  # 기존 rescue로 넘어가 이전 동작(빈 배열/false/nil 반환)을 그대로 유지한다.
+  # ──────────────────────────────────────────────
+
+  RETRYABLE_ERROR_PATTERNS = [
+    'execution expired',
+    'Server error',
+    'Internal error',
+    'Service Unavailable',
+    'timed out',
+    'Connection reset',
+    'temporarily unavailable'
+  ].freeze
+
+  def with_retry(max_attempts = 3)
+    attempts = 0
+    begin
+      attempts += 1
+      yield
+    rescue => e
+      retryable = e.is_a?(Google::Apis::TransmissionError) ||
+                  e.is_a?(Google::Apis::RateLimitError) ||
+                  e.is_a?(Google::Apis::ServerError) ||
+                  e.is_a?(Timeout::Error) ||
+                  RETRYABLE_ERROR_PATTERNS.any? { |p| e.message.to_s.include?(p) }
+
+      if retryable && attempts < max_attempts
+        wait = attempts * 1.5
+        puts "[시트 재시도] #{e.class}: #{e.message} - #{wait}초 후 재시도 (#{attempts}/#{max_attempts})"
+        sleep(wait)
+        retry
+      else
+        raise
+      end
+    end
+  end
+
+  # ──────────────────────────────────────────────
   # 전투로그 탭 기록 (실패해도 봇 동작에는 영향 없음)
   # ──────────────────────────────────────────────
 
@@ -24,10 +65,12 @@ class SheetManager
 
   def append_battle_log(row)
     body = Google::Apis::SheetsV4::ValueRange.new(values: [row])
-    @service.append_spreadsheet_value(
-      @sheet_id, "#{BATTLE_LOG_SHEET}!A:E", body,
-      value_input_option: 'RAW'
-    )
+    with_retry do
+      @service.append_spreadsheet_value(
+        @sheet_id, "#{BATTLE_LOG_SHEET}!A:E", body,
+        value_input_option: 'RAW'
+      )
+    end
     true
   rescue => e
     puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
@@ -39,7 +82,7 @@ class SheetManager
   # ──────────────────────────────────────────────
 
   def read(range)
-    @service.get_spreadsheet_values(@sheet_id, range).values || []
+    with_retry { @service.get_spreadsheet_values(@sheet_id, range).values } || []
   rescue => e
     puts "[시트 읽기 오류] #{range}: #{e.message}"
     []
@@ -47,12 +90,14 @@ class SheetManager
 
   def write(range, values)
     body = Google::Apis::SheetsV4::ValueRange.new(values: values)
-    @service.update_spreadsheet_value(
-      @sheet_id,
-      range,
-      body,
-      value_input_option: 'USER_ENTERED'
-    )
+    with_retry do
+      @service.update_spreadsheet_value(
+        @sheet_id,
+        range,
+        body,
+        value_input_option: 'USER_ENTERED'
+      )
+    end
     true
   rescue => e
     puts "[시트 쓰기 오류] #{range}: #{e.message}"
@@ -61,12 +106,14 @@ class SheetManager
 
   def append(range, values)
     body = Google::Apis::SheetsV4::ValueRange.new(values: [values])
-    @service.append_spreadsheet_value(
-      @sheet_id,
-      range,
-      body,
-      value_input_option: 'USER_ENTERED'
-    )
+    with_retry do
+      @service.append_spreadsheet_value(
+        @sheet_id,
+        range,
+        body,
+        value_input_option: 'USER_ENTERED'
+      )
+    end
     true
   rescue => e
     puts "[시트 추가 오류] #{range}: #{e.message}"
@@ -87,7 +134,7 @@ class SheetManager
 
   # 시트 읽기 실패(타임아웃 등) 시 nil을 반환해 호출부가 이전 상태를 유지할 수 있게 합니다.
   def read_bot_on_or_nil
-    rows = @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values || []
+    rows = with_retry { @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values } || []
     return false if rows.empty? || rows[0].nil?
     truthy?(rows[0][0])
   rescue => e
