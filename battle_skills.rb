@@ -9,7 +9,7 @@ module BattleSkills
     '강화' => { category: '지원', range: '3', cooldown: 2, kind: :atk_buff_area, ratio: 0.5 },
     '보호' => { category: '지원', range: '근접', cooldown: 2, kind: :shield, value: 30, max_targets: 3 },
     '백발백중' => { category: '지원', range: '3', cooldown: 2, kind: :sure_hit },
-    '응원' => { category: '지원', range: '3', once: true, kind: :luck_buff, value: 10, turns: 2 },
+    '응원' => { category: '지원', range: '3', once: true, kind: :luck_buff, value: 30, turns: 2 },
     '즉발' => { category: '지원', range: '3', cooldown: 3, kind: :cooldown_reset },
     '행운부여' => { category: '지원', range: '-', cooldown: 0, kind: :force_move },
 
@@ -26,11 +26,11 @@ module BattleSkills
     '전체공격' => { category: '공격', range: '-', cooldown: 0, kind: :area_attack, multiplier: 1.0 },
 
     '방어' => { category: '방어', range: '근접', cooldown: 1, kind: :dur_guard, ratio: 1.5 },
-    '회피' => { category: '방어', range: '자신', cooldown: 2, kind: :agi_buff_self, value: 20 },
+    '회피' => { category: '방어', range: '자신', cooldown: 2, kind: :agi_buff_self, value: 40 },
     '복수' => { category: '방어', range: '근접', cooldown: 3, kind: :revenge, multiplier: 2.0 },
     '희생' => { category: '방어', range: '1', cooldown: 1, kind: :cover },
     '철벽' => { category: '방어', range: '근접', cooldown: 3, kind: :dur_buff_area, ratio: 0.5 },
-    '주의분산' => { category: '방어', range: '근접', cooldown: 2, kind: :agi_buff_area, value: 15 },
+    '주의분산' => { category: '방어', range: '근접', cooldown: 2, kind: :agi_buff_area, value: 30 },
     '필사즉생' => { category: '방어', range: '-', once: true, kind: :survive_once },
 
     '물약사용' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 }
