@@ -102,7 +102,7 @@ def post_session_thread(session, text, last_post_time)
   now = Time.now
   sleep_time = POST_INTERVAL_SECONDS - (now - last_post_time)
   sleep(sleep_time) if sleep_time > 0
-  
+
   response = post_battle_thread(text, dm, session.thread_reply_id)
   if response && response['id']
     session.mark_thread_id(response['id'])
@@ -261,13 +261,13 @@ def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold
     candidate_sessions = sessions.values.select do |s|
       s.awaiting_boss && (s.id.to_s == root_or_thread_id || s.thread_ids.to_a.include?(root_or_thread_id))
     end
-    
+
     if candidate_sessions.length == 1
       session = candidate_sessions.first
     elsif candidate_sessions.length > 1
       unless quiet_hold
         puts "[전투봇] 보스행동커맨드 보류: 타래 연결이 모호함 (#{candidate_sessions.length}개 세션 매치, 자동 재시도)"
-        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 모호, 자동 재시도)")
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 모호, 자 동 재시도)")
       end
       return :hold
     else
@@ -293,12 +293,12 @@ def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold
     elsif active_waiting.length > 1
       unless quiet_hold
         puts "[전투봇] 보스행동커맨드 보류: 타래 미연결 + 대기 세션 여럿 (자동 재시도)"
-        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 미연결, 대기 세션 #{active_waiting.length}개, 자동 재시도)")
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 미연결,  대기 세션 #{active_waiting.length}개, 자동 재시도)")
       end
       return :hold
     else
       puts "[전투봇] 보스행동커맨드 무시: 대기 중인 세션 없음"
-      sheet_log(creature_sheet, '-', '-', '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (대기 중인 세션 없음)")
+      sheet_log(creature_sheet, '-', '-', '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (대기 중인 세션  없음)")
       return :ignored
     end
   end
@@ -363,7 +363,7 @@ def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold
 
   if override.empty?
     puts '[전투봇] 보스행동커맨드 무시: 스킬/대상 없음'
-    sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (스킬/대상 없음)")
+    sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} ( 스킬/대상 없음)")
     return :ignored
   end
 
@@ -656,8 +656,82 @@ rescue => e
   last_post_time
 end
 
+# 라운드 정산 결과 안내가 전부 게시될 때까지 재시도한다.
+# (부분 게시/게시 실패 시 라운드가 소리 없이 그냥 넘어가던 문제 수정)
+def flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
+  ctx = session.passive_ctx
+  pending = ctx[:pending_result]
+  return [last_post_time, false] unless pending
+
+  while pending[:parts].any?
+    part = pending[:parts].first
+    response, new_time = post_session_thread(session, part, last_post_time)
+    last_post_time = new_time
+
+    if response && response['id'] && !response['partial']
+      pending[:parts].shift
+    else
+      puts "[전투봇] [세션 #{session.id}] #{pending[:round]}라운드 결과 안내 미발송 (남은 #{pending[:parts].size}개) — 재시도 예정"
+      return [last_post_time, false]
+    end
+  end
+
+  ctx.delete(:pending_result)
+  session.mark_dead_runners(pending[:dead])
+
+  if pending[:creature_dead] || pending[:all_runners_dead]
+    session.active = false
+    session.auto_next_round_timer = nil
+    session.awaiting_boss = false
+    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{pending[:creature_dead] ? '승리' : '패배'})"
+    sheet_log(creature_sheet, session.id, pending[:round], '전투 종결', pending[:creature_dead] ? '크리쳐 격파 - 승리' : '전원 전투 불가 - 패배')
+
+    if pending[:creature_dead]
+      last_post_time = award_victory_credits!(session, scout_sheet, last_post_time)
+    end
+
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+
+    if scout_sheet
+      session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+    end
+
+    [last_post_time, true]
+  else
+    session.round += 1
+    session.phase = :boss_command
+    session.awaiting_boss = true
+    session.announced = false
+    session.actions = {}
+    session.processed_messages = {}
+    session.start_time = Time.now
+    session.auto_next_round_timer = nil
+
+    if session.auto_mode
+      auto_skill = select_auto_skill(session.creature, creature_sheet)
+      if auto_skill
+        session.passive_ctx[:boss_override] = { skill: auto_skill }
+        session.awaiting_boss = false
+        session.phase = :announcing
+      end
+    end
+
+    puts "[전투봇] [세션 #{session.id}] #{pending[:round]}라운드 정산 완료 - #{session.round}라운드 보스행동커맨드 대기"
+    [last_post_time, false]
+  end
+end
+
 def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet = nil, scout_grid_sheet = nil)
   return [last_post_time, false] unless session.active
+
+  ctx = session.passive_ctx
+
+  # 이전 라운드 결과 안내가 아직 완전히 게시되지 못했다면, 새 라운드를
+  # 정산하기 전에 먼저 그 결과부터 끝까지 게시되도록 재시도한다.
+  if ctx[:pending_result]
+    return flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
+  end
+
   return [last_post_time, false] unless session.phase == :battle
 
   required = session.required_actions
@@ -710,64 +784,26 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     timeout: round_timeout && !round_done
   )
 
-  Array(result).each do |part|
-    response, new_time = post_session_thread(session, part, last_post_time)
-    last_post_time = new_time
-  end
-
   dead = runner_state.select { |r| session.runner_names.include?(r[:name].to_s) && r[:hp].to_i <= 0 }.map { |r| r[:name].to_s }
-  session.mark_dead_runners(dead)
-
   creature_dead = session.creature[:hp].to_i <= 0
   all_runners_dead = runner_state.none? { |r| session.runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
-
-  ctx = session.passive_ctx
-  positions = (ctx[:positions] ||= {})
 
   actions_text = session.actions.map { |name, act| "#{name}: [#{act[:type]}/#{act[:target]}]" }.join(' / ')
   sheet_log(creature_sheet, session.id, session.round, '정산',
             "행동: #{actions_text.empty? ? '없음' : actions_text}\n\n#{Array(log).join("\n")}")
 
-  if creature_dead || all_runners_dead
-    session.active = false
-    session.auto_next_round_timer = nil
-    session.awaiting_boss = false
-    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{creature_dead ? '승리' : '패배'})"
-    sheet_log(creature_sheet, session.id, session.round, '전투 종결', creature_dead ? '크리쳐 격파 - 승리' : '전원 전투불가 - 패배')
+  # 정산은 끝났지만 결과 안내는 전부 게시될 때까지 확정하지 않는다.
+  # (게시 실패/부분 게시 시에도 라운드가 그냥 넘어가던 문제 수정)
+  ctx[:pending_result] = {
+    parts: Array(result),
+    round: session.round,
+    dead: dead,
+    creature_dead: creature_dead,
+    all_runners_dead: all_runners_dead
+  }
+  session.phase = :settling
 
-    if creature_dead
-      last_post_time = award_victory_credits!(session, scout_sheet, last_post_time)
-    end
-
-    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
-
-    if scout_sheet
-      session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
-    end
-
-    [last_post_time, true]
-  else
-    session.round += 1
-    session.phase = :boss_command
-    session.awaiting_boss = true
-    session.announced = false
-    session.actions = {}
-    session.processed_messages = {}
-    session.start_time = Time.now
-    session.auto_next_round_timer = nil
-    
-    if session.auto_mode
-      auto_skill = select_auto_skill(session.creature, creature_sheet)
-      if auto_skill
-        session.passive_ctx[:boss_override] = { skill: auto_skill }
-        session.awaiting_boss = false
-        session.phase = :announcing
-      end
-    end
-    
-    puts "[전투봇] [세션 #{session.id}] #{session.round - 1}라운드 정산 완료 - #{session.round}라운드 보스행동커맨드 대기"
-    [last_post_time, false]
-  end
+  flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
 end
 
 def select_auto_skill(creature, creature_sheet)
