@@ -595,6 +595,10 @@ end
 def award_victory_credits!(session, scout_sheet, last_post_time)
   return last_post_time unless scout_sheet
 
+  representative = session.runner_names.first
+  return last_post_time unless representative
+  return last_post_time unless ScoutDirections.from_grid_encounter?(scout_sheet, representative)
+
   reward = session.creature[:reward].to_i
   return last_post_time if reward <= 0
 
@@ -631,6 +635,9 @@ def announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post
   # (개인별로 따로 안내하면 각자 다른 방향으로 흩어질 수 있어 파티 단위로 통일)
   representative = session.runner_names.first
   return last_post_time unless representative
+
+  # 레이드 단독 전투(격자 조사와 무관)에는 방향 안내를 하지 않는다.
+  return last_post_time unless ScoutDirections.from_grid_encounter?(scout_sheet, representative)
 
   directions_text = ScoutDirections.build_announcement(scout_sheet, scout_grid_sheet, representative)
   return last_post_time unless directions_text
@@ -733,6 +740,11 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     end
 
     last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+
+    if scout_sheet
+      session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+    end
+
     [last_post_time, true]
   else
     session.round += 1
