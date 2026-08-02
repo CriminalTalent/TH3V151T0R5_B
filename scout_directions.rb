@@ -192,4 +192,43 @@ module ScoutDirections
     puts "[ScoutDirections.add_credits 오류] #{e.class}: #{e.message}"
     nil
   end
+
+  # ── 격자 조우 여부 판별 ──
+  #
+  # 전투가 조사맵 격자 칸(C~O, 2~8)에서 발생한 것인지 확인한다.
+  # 러너의 "조사상태" 시트 위치가 격자 좌표 형식이면 격자 조우로 본다.
+  # (레이드 전용 전투처럼 조사맵과 무관하게 시작된 전투에는 방향 안내/
+  # 처치 보상을 하지 않기 위한 판별 기준)
+  def from_grid_encounter?(scout_sheet, acct)
+    coord = find_location(scout_sheet, acct)
+    valid_coord?(coord)
+  end
+
+  # ── 전투 종료 후 조사봇 상태 플래그 정리 ──
+  #
+  # 격자 조우 트리거(grid_move_command.rb / location_command.rb의
+  # trigger_encounter)가 조사상태 '최근행동'을 '전투전환'으로 남겨두므로,
+  # 전투가 끝나면 이를 정리해 러너가 다시 [탐사/...] [위치/...] 등을
+  # 정상적으로 쓸 수 있게 한다. 위치 자체는 건드리지 않는다.
+  def clear_battle_flag!(scout_sheet, acct)
+    return unless scout_sheet
+
+    acct = acct.to_s.gsub('@', '').strip
+    rows = scout_sheet.read("'조사상태'!A:C")
+    return if rows.empty?
+
+    idx = header_index(rows[0])
+    id_col     = idx['ID'] || 0
+    action_col = idx['최근행동'] || 2
+
+    rows[1..].to_a.each_with_index do |row, i|
+      id = row[id_col].to_s.gsub('@', '').strip
+      next unless id == acct
+
+      scout_sheet.write("'조사상태'!#{column_letter(action_col)}#{i + 2}", [['전투종료']])
+      return
+    end
+  rescue => e
+    puts "[ScoutDirections.clear_battle_flag! 오류] #{e.class}: #{e.message}"
+  end
 end
