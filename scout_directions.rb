@@ -181,7 +181,7 @@ module ScoutDirections
       next unless id == acct
 
       current = row[credit_col].to_s.strip.to_i
-      new_credits = [current + amount.to_i, 0].max
+      new_credits = current + amount.to_i
 
       scout_sheet.write("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits]])
       return new_credits
