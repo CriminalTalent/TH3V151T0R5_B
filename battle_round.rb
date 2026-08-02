@@ -411,6 +411,28 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
     sure = ctx[:sure_hit].delete(name)
     sacrifice_attack = skill[:kind] == :sacrifice_attack
+    rush_attack = skill[:kind] == :rush
+
+    eff_atk = s[:atk].to_i + atk_bonus[name]
+    multiplier = skill[:multiplier] || 1.0
+
+    # 습격은 "돌진해서 때리는" 행동이라, 공격 명중/회피 판정과 무관하게
+    # 먼저 이동부터 처리합니다. 공격이 빗나가도 돌진 자체는 이미 일어난
+    # 행동이므로 제자리로 남지 않습니다.
+    if rush_attack
+      rush_parts = skill_parts(act[:target])
+      dest = rush_parts[1].to_s.upcase
+      if BattleGrid.valid_pos?(dest)
+        dist = BattleGrid.distance(actor[:pos], dest).to_i
+        multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
+        if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
+          old_pos = actor[:pos]
+          actor[:pos] = dest
+          (ctx[:positions] ||= {})[name.to_s] = dest
+          log << "#{display_name_of.call(name)}의 습격 이동 #{old_pos} → #{dest}"
+        end
+      end
+    end
 
     hit_detail = nil
     evade_detail = nil
@@ -455,10 +477,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       end
     end
 
-    eff_atk = s[:atk].to_i + atk_bonus[name]
-    multiplier = skill[:multiplier] || 1.0
-
-    if skill[:kind] == :sacrifice_attack
+    if sacrifice_attack
       parts = skill_parts(act[:target])
       cost = parts[1].to_i
       cost = 10 if cost <= 0
@@ -473,22 +492,6 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       log << "#{display_name_of.call(name)}의 고육지책"
       log << "#{display_name_of.call(name)} 건강 #{before_hp} → #{actor[:hp]} (소모 #{cost})"
       log << "마법능력 +#{bonus}"
-    elsif skill[:kind] == :rush
-      parts = skill_parts(act[:target])
-      dest = parts[1].to_s.upcase
-      if BattleGrid.valid_pos?(dest)
-        dist = BattleGrid.distance(actor[:pos], dest).to_i
-        multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
-        if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
-          old_pos = actor[:pos]
-          actor[:pos] = dest
-          # 습격으로 이동한 위치를 준비 라운드/이동 스킬과 동일하게
-          # ctx[:positions]에도 반영합니다. 이걸 빠뜨리면 다음 라운드
-          # 정산 시작 시 위치가 습격 이전 좌표로 되돌아갑니다.
-          (ctx[:positions] ||= {})[name.to_s] = dest
-          log << "#{display_name_of.call(name)}의 습격 이동 #{old_pos} → #{dest}"
-        end
-      end
     end
 
     apply_damage_to_creature(
