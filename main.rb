@@ -918,14 +918,29 @@ loop do
       end
 
       if battle_end_text?(content)
+        end_sid = last_status['id'].to_s
+
+        if handled_battle_end_status_ids.include?(end_sid)
+          processed_dm_ids.add(dm_id)
+          next
+        end
+
         target = find_session_for_action(sessions, username, last_status)
-        target ||= sessions.values.select(&:active).max_by(&:start_time)
+        if target.nil?
+          active_sessions = sessions.values.select(&:active)
+          target = active_sessions.first if active_sessions.length == 1
+        end
+
         if target
           target.active = false
           target.auto_next_round_timer = nil
+          handled_battle_end_status_ids.add(end_sid)
           last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
           puts "[전투봇] [세션 #{target.id}] DM 전투 중단"
           sheet_log(creature_sheet, target.id, target.round, '전투 중단', "@#{username} 의 종료 명령")
+        else
+          puts "[전투봇] DM 종료 명령 무시: 연결 세션 불명확 @#{username}"
+          sheet_log(creature_sheet, '-', '-', '전투 종료 명령 무시', "@#{username} / DM 연결 세션 불명확 / status=#{end_sid}")
         end
         processed_dm_ids.add(dm_id)
         next
