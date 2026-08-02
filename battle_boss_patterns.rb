@@ -180,9 +180,15 @@ module BattleBossPatterns
     # (기존에는 크리쳐의 기본 반격에만 적용되고, 보스행동커맨드로 지정되는
     # 실제 패턴 공격에는 반영되지 않던 문제 수정)
     if ctx[:survive_once] && ctx[:survive_once][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
+      overkill = dmg > runner[:hp].to_i
       dmg = runner[:hp].to_i - 1
       ctx[:survive_once].delete(name)
       log << "#{dname}: 필사즉생으로 건강 0 이하 방지"
+      if overkill
+        ctx[:survive_penalty] ||= {}
+        ctx[:survive_penalty][name] = true
+        log << "#{dname}: 받은 피해가 잔여 건강을 초과하여 다음 라운드 행동할 수 없습니다"
+      end
     end
 
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
