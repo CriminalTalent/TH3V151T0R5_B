@@ -674,11 +674,10 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
 
 
   begin
-    stats = view_sheet.read_base_stats
-    puts "[DEBUG] base_stats=#{stats.size}"
+    puts "[DEBUG] base_stats=#{base_stats.size}"
 
     runner_names.each do |id|
-      row = stats.find { |s|
+      row = base_stats.find { |s|
         s[:id].to_s == id.to_s ||
         s[:name].to_s == id.to_s
       }
@@ -686,7 +685,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
       puts "[DEBUG] #{id} => #{row.inspect}"
     end
   rescue => e
-    puts "[DEBUG] read_base_stats ERROR #{e.class}: #{e.message}"
+    puts "[DEBUG] base_stats 확인 오류 #{e.class}: #{e.message}"
   end
 
 
