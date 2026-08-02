@@ -125,29 +125,28 @@ module BattleBossPatterns
 
   def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil)
     name = runner[:name]
+    stats = stats_of ? stats_of.call(name) : {}
     dname = runner[:display_name].to_s.strip
     dname = name.to_s if dname.empty?
-
-    # 희생(커버): 대상이 다른 아군의 보호를 받고 있으면 명중 판정 후 대상이 교체됩니다.
     cover_name = ctx[:cover] ? ctx[:cover][name] : nil
     if cover_name && runner_state
       cover_runner = runner_state.find { |r| r[:name].to_s == cover_name.to_s }
       if cover_runner && cover_runner[:hp].to_i > 0
         cover_dname = cover_runner[:display_name].to_s.strip
         cover_dname = cover_name.to_s if cover_dname.empty?
-        unless BattleCalculator.hit?(creature[:tec].to_i)
-          log << "#{creature[:name]}의 공격 → #{cover_dname}의 희생(#{dname} 대신) 대상, 빗나감"
-          log << ''
-          return 0
-        end
         log << "#{cover_dname} → [희생] #{dname} 대신 피격"
         runner = cover_runner
         name = runner[:name]
         dname = cover_dname
       end
     end
-
-    stats = stats_of ? stats_of.call(name) : {}
+    hit_detail = BattleCalculator.hit_detail(creature[:tec].to_i)
+    log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
+    unless hit_detail[:success]
+      log << "#{dname} 회피 — 피해 없음"
+      log << ''
+      return 0
+    end
 
     # 회피 판정: 보스의 모든 피해 패턴에 자동 적용 (민첩 버프 포함)
     base_agi = stats[:agi].to_i
@@ -174,13 +173,22 @@ module BattleBossPatterns
       blocked = [shields[name].to_i, dmg].min
       shields[name] -= blocked
       dmg -= blocked
-      log << "#{dname} 보호막 #{blocked} 흡수"
+      log << "#{name} 보호막 #{blocked} 흡수"
+    end
+
+    # 필사즉생: 이번 턴 건강이 0 이하로 떨어지는 것을 1회 방지.
+    # (기존에는 크리쳐의 기본 반격에만 적용되고, 보스행동커맨드로 지정되는
+    # 실제 패턴 공격에는 반영되지 않던 문제 수정)
+    if ctx[:survive_once] && ctx[:survive_once][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
+      dmg = runner[:hp].to_i - 1
+      ctx[:survive_once].delete(name)
+      log << "#{dname}: 필사즉생으로 건강 0 이하 방지"
     end
 
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
     took_damage[name] = true if took_damage && dmg > 0
 
-    log << "-#{dname}"
+    log << "-#{name}"
     log << "피해:#{dmg}"
     log << "HP: #{runner[:hp].to_i + dmg} → #{runner[:hp]}"
 
@@ -188,7 +196,7 @@ module BattleBossPatterns
 
     if runner[:hp].to_i <= 0
       runner[:status] = '전투불가'
-      log << "#{dname} 전투불가"
+      log << "#{name} 전투불가"
     end
 
     dmg
@@ -256,8 +264,7 @@ module BattleBossPatterns
             defended_multiplier: defended_multiplier,
             shields: shields,
             took_damage: took_damage,
-            agi_bonus: agi_bonus,
-            runner_state: runner_state
+            agi_bonus: agi_bonus
           )
         end
       end
@@ -314,8 +321,7 @@ module BattleBossPatterns
           defended_multiplier: defended_multiplier,
           shields: shields,
           took_damage: took_damage,
-          agi_bonus: agi_bonus,
-          runner_state: runner_state
+          agi_bonus: agi_bonus
         )
       end
     end
