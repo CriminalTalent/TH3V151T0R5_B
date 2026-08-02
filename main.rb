@@ -151,16 +151,9 @@ def announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessi
 
   map_lines = BattleGrid.render([], session.creature)
 
+  # 다른 팀(다른 세션)의 몹은 노출하지 않습니다. 본인 세션의 몹 상태는
+  # 위 announcement에서 이미 별도로 표시됩니다.
   raid_overview = ''
-  if sessions
-    active_creatures = sessions.values.select(&:active).map do |s|
-      c = s.creature
-      "#{c[:name]} @ #{c[:pos]} (크기: #{c[:size] || '1x1'}, 머리 #{BattleGrid.facing_arrow(c[:facing] || '하')})"
-    end
-    if active_creatures.size > 1
-      raid_overview = "레이드 전체 몹 현황\n#{active_creatures.join("\n")}\n\n"
-    end
-  end
 
   announcement = "#{session.runner_tags}\n\n" \
                  "[준비 라운드] #{session.creature[:name]}와의 전투!\n" \
@@ -445,6 +438,15 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
     r[:display_name] = label.empty? ? r[:name].to_s : label
   end
   session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
+
+  if ctx[:survive_penalty] && ctx[:survive_penalty].any?
+    ctx[:survive_penalty].each_key do |name|
+      next unless session.runner_names.include?(name)
+      next if session.dead_runners.to_a.include?(name)
+      session.actions[name] = { type: '필사즉생 후유증', target: '' }
+    end
+    ctx[:survive_penalty] = {}
+  end
 
   refresh_creature_skill!(session.creature, creature_sheet)
   creature = session.creature
