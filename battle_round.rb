@@ -577,9 +577,15 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
             end
 
             if ctx[:survive_once][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
+              overkill = dmg > target[:hp].to_i
               dmg = target[:hp].to_i - 1
               ctx[:survive_once].delete(tname)
               log << "#{display_name_of.call(tname)}: 필사즉생으로 건강 0 이하 방지"
+              if overkill
+                ctx[:survive_penalty] ||= {}
+                ctx[:survive_penalty][tname] = true
+                log << "#{display_name_of.call(tname)}: 받은 피해가 잔여 건강을 초과하여 다음 라운드 행동할 수 없습니다"
+              end
             elsif ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
                   !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
               dmg = target[:hp].to_i - 1
@@ -650,6 +656,8 @@ def action_text_for_result(name, action, creature_name)
     return "#{name}: 이동 #{from} → #{to}" unless from.empty?
     return "#{name}: 이동 #{to}"
   end
+
+  return "#{name}: 필사즉생 후유증 (행동 불가)" if type == '필사즉생 후유증'
 
   target = creature_name if ['크리쳐', creature_name].include?(target)
   "#{name}: #{type} (#{target})"
