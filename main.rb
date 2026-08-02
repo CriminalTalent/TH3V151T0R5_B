@@ -103,9 +103,10 @@ def post_session_thread(session, text, last_post_time)
   sleep_time = POST_INTERVAL_SECONDS - (now - last_post_time)
   sleep(sleep_time) if sleep_time > 0
 
+  # 매 안내를 직전 안내글이 아니라 항상 최초 툿(session.thread_reply_id, 고정값)에
+  # 답장으로 달아, 스레드가 계속 깊게 늘어지지 않고 첫 툿 아래로 평평하게 쌓이도록 합니다.
   response = post_battle_thread(text, dm, session.thread_reply_id)
   if response && response['id']
-    session.mark_thread_id(response['id'])
     session.thread_ids ||= Set.new
     Array(response['all_ids']).each { |id| session.thread_ids.add(id.to_s) }
     session.thread_ids.add(response['id'].to_s)
