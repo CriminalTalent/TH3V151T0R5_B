@@ -1019,7 +1019,7 @@ loop do
           target.awaiting_boss = false
           handled_battle_end_status_ids.add(end_sid)
 
-          response, new_time = post_session_thread(target, '[전투 중단]', last_post_time)
+          response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
           last_post_time = new_time
           puts "[전투봇] [세션 #{target.id}] 공개 전투 중단"
           sheet_log(
