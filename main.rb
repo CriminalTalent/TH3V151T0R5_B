@@ -694,7 +694,11 @@ def flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet
     last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
 
     if scout_sheet
-      session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+      begin
+        session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+      rescue => e
+        puts "[전투봇] [세션 #{session.id}] 조사봇 전투 플래그 해제 실패: #{e.class}: #{e.message}"
+      end
     end
 
     [last_post_time, true]
