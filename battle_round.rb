@@ -730,7 +730,11 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
 " }
 
   # 2툿: 전투 로그 + 상태
-  part2 = "#{title} - 결과
+  # DM(direct) 발송 시 수신자 멘션이 없으면 게시는 되어도 상대방에게는
+  # 보이지 않으므로, part1과 동일하게 runner_tags를 앞에 붙입니다.
+  part2 = "#{runner_tags}
+
+#{title} - 결과
 
 "
   part2 += "전투 로그
