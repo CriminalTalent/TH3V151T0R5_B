@@ -657,6 +657,23 @@ rescue => e
   last_post_time
 end
 
+def announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
+  response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
+  last_post_time = new_time
+
+  last_post_time = announce_scout_directions!(target, scout_sheet, scout_grid_sheet, last_post_time)
+
+  if scout_sheet
+    begin
+      target.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+    rescue => e
+      puts "[전투봇] [세션 #{target.id}] 조사봇 전투 플래그 해제 실패: #{e.class}: #{e.message}"
+    end
+  end
+
+  last_post_time
+end
+
 # 라운드 정산 결과 안내가 전부 게시될 때까지 재시도한다.
 # (부분 게시/게시 실패 시 라운드가 소리 없이 그냥 넘어가던 문제 수정)
 def flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
@@ -906,8 +923,7 @@ loop do
         if target
           target.active = false
           target.auto_next_round_timer = nil
-          response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
-          last_post_time = new_time
+          last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
           puts "[전투봇] [세션 #{target.id}] DM 전투 중단"
           sheet_log(creature_sheet, target.id, target.round, '전투 중단', "@#{username} 의 종료 명령")
         end
@@ -1019,8 +1035,7 @@ loop do
           target.awaiting_boss = false
           handled_battle_end_status_ids.add(end_sid)
 
-          response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
-          last_post_time = new_time
+          last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
           puts "[전투봇] [세션 #{target.id}] 공개 전투 중단"
           sheet_log(
             creature_sheet,
@@ -1138,8 +1153,7 @@ loop do
           target.awaiting_boss = false
           handled_battle_end_status_ids.add(end_sid)
 
-          response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
-          last_post_time = new_time
+          last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
 
           puts "[전투봇] [세션 #{target.id}] 멘션 전투 중단 / status=#{end_sid}"
           sheet_log(
