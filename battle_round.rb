@@ -43,14 +43,14 @@ def mark_once!(ctx, name, skill_name)
 end
 
 # 쿨타임 게이트: 사용 가능하면 쿨타임을 기록하고 true, 쿨타임 중이면 false
-def cooldown_gate!(ctx, log, name, skill_name, skill)
+def cooldown_gate!(ctx, log, name, skill_name, skill, dname = nil)
   return true if skill[:once]
   cd = skill[:cooldown].to_i
   return true if cd <= 0
 
   left = ctx[:cooldowns][name][skill_name].to_i
   if left > 0
-    log << "#{name}의 #{skill_name} → 쿨타임 #{left}라운드 남음 (행동 무효)"
+    log << "#{dname || name}의 #{skill_name} → 쿨타임 #{left}라운드 남음 (행동 무효)"
     return false
   end
 
@@ -205,16 +205,17 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     target_names = split_targets(parts[0])
     target_name = target_names.first.to_s
     target = state_of.call(target_name)
+    dname = display_name_of.call(name)
 
     if skill[:once]
       if !can_use_once?(ctx, name, skill_name)
-        log << "#{name}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
+        log << "#{dname}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
         next
       end
       mark_once!(ctx, name, skill_name)
     end
 
-    next unless cooldown_gate!(ctx, log, name, skill_name, skill)
+    next unless cooldown_gate!(ctx, log, name, skill_name, skill, dname)
 
     case skill[:kind]
     when :heal
@@ -225,9 +226,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         heal = (s[:atk].to_i * skill[:ratio].to_f).ceil
         before = t[:hp].to_i
         t[:hp] = [before + heal, t[:max_hp].to_i].min
-        healed << "#{tname} 건강 +#{t[:hp] - before}"
+        healed << "#{display_name_of.call(tname)} 건강 +#{t[:hp] - before}"
       end
-      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
+      log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :heal_fixed
       healed = []
       target_names.each do |tname|
@@ -235,9 +236,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         next unless t && t[:hp].to_i > 0
         before = t[:hp].to_i
         t[:hp] = [before + skill[:value].to_i, t[:max_hp].to_i].min
-        healed << "#{tname} 건강 +#{t[:hp] - before}"
+        healed << "#{display_name_of.call(tname)} 건강 +#{t[:hp] - before}"
       end
-      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
+      log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :heal_area
       healed = []
       runner_state.each do |r|
@@ -246,9 +247,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         heal = (s[:atk].to_i * skill[:ratio].to_f).ceil
         before = r[:hp].to_i
         r[:hp] = [before + heal, r[:max_hp].to_i].min
-        healed << "#{r[:name]} +#{r[:hp] - before}"
+        healed << "#{display_name_of.call(r[:name])} +#{r[:hp] - before}"
       end
-      log << "#{name}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
+      log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :atk_buff_area
       amount = (s[:atk].to_i * skill[:ratio].to_f).ceil
       affected = []
@@ -259,9 +260,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         ctx[:buffs][r[:name]].reject! { |b| b[:stat] == :atk }
         atk_bonus[r[:name]] += (amount - existing)
         ctx[:buffs][r[:name]] << { stat: :atk, value: amount, turns: 1 }
-        affected << r[:name]
+        affected << display_name_of.call(r[:name])
       end
-      log << "#{name}의 강화 → #{affected.join(', ')} 마법능력 +#{amount}" if affected.any?
+      log << "#{dname}의 강화 → #{affected.join(', ')} 마법능력 +#{amount}" if affected.any?
     when :shield
       applied = []
       limit = skill[:max_targets] || target_names.size
@@ -269,18 +270,18 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         t = state_of.call(tname)
         next unless t
         shields[tname] += skill[:value].to_i
-        applied << tname
+        applied << display_name_of.call(tname)
       end
-      log << "#{name}의 보호 → #{applied.join(', ')} 보호막 +#{skill[:value]}" if applied.any?
+      log << "#{dname}의 보호 → #{applied.join(', ')} 보호막 +#{skill[:value]}" if applied.any?
     when :sure_hit
       applied = []
       target_names.each do |tname|
         t = state_of.call(tname)
         next unless t
         ctx[:sure_hit][tname] = true
-        applied << tname
+        applied << display_name_of.call(tname)
       end
-      log << "#{name}의 백발백중 → #{applied.join(', ')}의 다음 공격 필중/크리티컬" if applied.any?
+      log << "#{dname}의 백발백중 → #{applied.join(', ')}의 다음 공격 필중/크리티컬" if applied.any?
     when :luck_buff
       applied = []
       target_names.each do |tname|
@@ -288,25 +289,25 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         next unless t
         luck_bonus[tname] += skill[:value].to_i
         ctx[:buffs][tname] << { stat: :luck, value: skill[:value].to_i, turns: skill[:turns].to_i }
-        applied << tname
+        applied << display_name_of.call(tname)
       end
-      log << "#{name}의 응원 → #{applied.join(', ')} 행운 +#{skill[:value]} (#{skill[:turns]}턴)" if applied.any?
+      log << "#{dname}의 응원 → #{applied.join(', ')} 행운 +#{skill[:value]} (#{skill[:turns]}턴)" if applied.any?
     when :cooldown_reset
       skill_to_reset = parts[1].to_s.strip
       if skill_to_reset.empty?
-        log << "#{name}의 즉발 → 초기화할 스킬명 미입력 (무효)"
+        log << "#{dname}의 즉발 → 초기화할 스킬명 미입력 (무효)"
       else
         applied = []
         target_names.each do |tname|
           t = state_of.call(tname)
           next unless t
           ctx[:cooldowns][tname].delete(skill_to_reset)
-          applied << tname
+          applied << display_name_of.call(tname)
         end
         if applied.any?
-          log << "#{name}의 즉발 → #{applied.join(', ')}의 [#{skill_to_reset}] 쿨타임 초기화"
+          log << "#{dname}의 즉발 → #{applied.join(', ')}의 [#{skill_to_reset}] 쿨타임 초기화"
         else
-          log << "#{name}의 즉발 → 대상 없음 (무효)"
+          log << "#{dname}의 즉발 → 대상 없음 (무효)"
         end
       end
     when :force_move
@@ -316,9 +317,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         if ok
           target[:pos] = coord
           (ctx[:positions] ||= {})[target_name.to_s] = coord
-          log << "#{display_name_of.call(name)}의 행운부여 → #{target_name}을(를) #{coord}로 이동"
+          log << "#{dname}의 행운부여 → #{display_name_of.call(target_name)}을(를) #{coord}로 이동"
         else
-          log << "#{name}의 행운부여 실패 → #{msg}"
+          log << "#{dname}의 행운부여 실패 → #{msg}"
         end
       end
     end
@@ -337,32 +338,33 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     target_name = normalize_target(parts[0])
     target_name = name if target_name.empty? && skill[:range] == '자신'
     target = state_of.call(target_name)
+    dname = display_name_of.call(name)
 
     if skill[:once]
       if !can_use_once?(ctx, name, skill_name)
-        log << "#{name}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
+        log << "#{dname}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
         next
       end
       mark_once!(ctx, name, skill_name)
     end
 
-    next unless cooldown_gate!(ctx, log, name, skill_name, skill)
+    next unless cooldown_gate!(ctx, log, name, skill_name, skill, dname)
 
     case skill[:kind]
     when :dur_guard
       target_name = name if target_name.empty?
       dur_bonus[target_name] += (stats_of.call(target_name)[:dur].to_i * 0.5).ceil
       defended_multiplier[target_name] *= skill[:ratio].to_f
-      log << "#{name}의 방어 → #{target_name} 내구도 1.5배"
+      log << "#{dname}의 방어 → #{display_name_of.call(target_name)} 내구도 1.5배"
     when :agi_buff_self
       agi_bonus[name] += skill[:value].to_i
-      log << "#{name}의 회피 → 민첩 +#{skill[:value]}"
+      log << "#{dname}의 회피 → 민첩 +#{skill[:value]}"
     when :revenge
       ctx[:revenge][target_name] = { by: name, multiplier: skill[:multiplier] }
-      log << "#{name}의 복수 → #{target_name} 피격 시 반격 대기"
+      log << "#{dname}의 복수 → #{display_name_of.call(target_name)} 피격 시 반격 대기"
     when :cover
       ctx[:cover][target_name] = name if target
-      log << "#{name}의 희생 → #{target_name} 대신 피격 대기" if target
+      log << "#{dname}의 희생 → #{display_name_of.call(target_name)} 대신 피격 대기" if target
     when :dur_buff_area
       amount = (s[:dur].to_i * skill[:ratio].to_f).ceil
       affected = []
@@ -370,21 +372,21 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
         dur_bonus[r[:name]] += amount
-        affected << r[:name]
+        affected << display_name_of.call(r[:name])
       end
-      log << "#{name}의 철벽 → #{affected.join(', ')} 내구도 +#{amount}" if affected.any?
+      log << "#{dname}의 철벽 → #{affected.join(', ')} 내구도 +#{amount}" if affected.any?
     when :agi_buff_area
       affected = []
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
         next unless BattleGrid.in_range?(actor[:pos], r[:pos], skill[:range])
         agi_bonus[r[:name]] += skill[:value].to_i
-        affected << r[:name]
+        affected << display_name_of.call(r[:name])
       end
-      log << "#{name}의 주의분산 → #{affected.join(', ')} 민첩 +#{skill[:value]}" if affected.any?
+      log << "#{dname}의 주의분산 → #{affected.join(', ')} 민첩 +#{skill[:value]}" if affected.any?
     when :survive_once
       ctx[:survive_once][name] = true
-      log << "#{name}의 필사즉생 → 이번 턴 건강 0 이하 방지"
+      log << "#{dname}의 필사즉생 → 이번 턴 건강 0 이하 방지"
     end
   end
 
@@ -401,13 +403,13 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
     if skill[:once]
       if !can_use_once?(ctx, name, skill_name)
-        log << "#{name}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
+        log << "#{display_name_of.call(name)}의 #{skill_name} → 이미 사용한 전투 중 1회 스킬"
         next
       end
       mark_once!(ctx, name, skill_name)
     end
 
-    next unless cooldown_gate!(ctx, log, name, skill_name, skill)
+    next unless cooldown_gate!(ctx, log, name, skill_name, skill, display_name_of.call(name))
 
     sure = ctx[:sure_hit].delete(name)
     sacrifice_attack = skill[:kind] == :sacrifice_attack
@@ -447,7 +449,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
 
       unless hit_detail[:success]
-        log << "#{name}의 #{skill_name} → 공격 실패"
+        log << "#{display_name_of.call(name)}의 #{skill_name} → 공격 실패"
         next
       end
     end
