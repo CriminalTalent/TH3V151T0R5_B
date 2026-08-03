@@ -216,6 +216,18 @@ module BattleBossPatterns
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
     took_damage[name] = true if took_damage && dmg > 0
 
+    if ctx[:revenge] && ctx[:revenge][name] && dmg > 0 && runner_state
+      rev_by = ctx[:revenge][name][:by]
+      rev_actor = runner_state.find { |r| r[:name].to_s == rev_by.to_s }
+      if rev_actor && rev_actor[:hp].to_i > 0
+        rev_dname = rev_actor[:display_name].to_s.strip
+        rev_dname = rev_by.to_s if rev_dname.empty?
+        rev_dmg = BattleCalculator.calc_damage((dmg * ctx[:revenge][name][:multiplier]).ceil, creature[:dur].to_i)
+        creature[:hp] = [creature[:hp].to_i - rev_dmg, 0].max
+        log << "#{rev_dname}의 복수 → #{creature[:name]}에게 #{rev_dmg} 반격 피해"
+      end
+    end
+
     log << "-#{name}"
     log << "피해:#{dmg}"
     log << "HP: #{runner[:hp].to_i + dmg} → #{runner[:hp]}"
@@ -292,7 +304,8 @@ module BattleBossPatterns
             defended_multiplier: defended_multiplier,
             shields: shields,
             took_damage: took_damage,
-            agi_bonus: agi_bonus
+            agi_bonus: agi_bonus,
+            runner_state: runner_state
           )
         end
       end
@@ -349,7 +362,8 @@ module BattleBossPatterns
           defended_multiplier: defended_multiplier,
           shields: shields,
           took_damage: took_damage,
-          agi_bonus: agi_bonus
+          agi_bonus: agi_bonus,
+          runner_state: runner_state
         )
       end
     end
