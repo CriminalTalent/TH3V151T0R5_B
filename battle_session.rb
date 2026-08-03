@@ -50,10 +50,19 @@ class BattleSession
     @runner_names.include?(username.to_s.gsub('@', '').strip)
   end
 
+  # 다음 봇 안내가 답장으로 달릴 대상을 갱신합니다. 봇이 새로 올린 글이든,
+  # 세션에 실제로 반영된 사용자 메시지(행동 등록/시작 위치 입력/보스행동커맨드
+  # 적용)든 상관없이, 숫자로 비교했을 때 더 나중(더 큰 ID)인 쪽이 항상
+  # 다음 답장 대상이 되도록 합니다. 이렇게 하면 "봇 안내 → 유저 답장 →
+  # 봇 다음 안내"처럼 대화가 실제로 오간 순서 그대로 스레드가 이어집니다.
   def mark_thread_id(status_id)
-    return if status_id.to_s.strip.empty?
-    @thread_ids.add(status_id.to_s)
-    @thread_reply_id = status_id.to_s
+    sid = status_id.to_s.strip
+    return if sid.empty?
+    @thread_ids.add(sid)
+
+    if @thread_reply_id.to_s.strip.empty? || sid.to_i > @thread_reply_id.to_i
+      @thread_reply_id = sid
+    end
   end
 
   def related_to_status?(status)
