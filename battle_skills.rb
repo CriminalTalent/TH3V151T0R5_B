@@ -34,6 +34,7 @@ module BattleSkills
     '필사즉생' => { category: '방어', range: '-', once: true, kind: :survive_once },
 
     '물약사용' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 },
+    '위겐웰드 물약' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 },
     '디터니 원액' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 30 },
     '수상한 영약' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 50 }
   }.freeze
