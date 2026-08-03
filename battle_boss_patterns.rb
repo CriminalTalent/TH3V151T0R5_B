@@ -125,9 +125,10 @@ module BattleBossPatterns
 
   def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil)
     name = runner[:name]
-    stats = stats_of ? stats_of.call(name) : {}
     dname = runner[:display_name].to_s.strip
     dname = name.to_s if dname.empty?
+
+    redirected = false
     cover_name = ctx[:cover] ? ctx[:cover][name] : nil
     if cover_name && runner_state
       cover_runner = runner_state.find { |r| r[:name].to_s == cover_name.to_s }
@@ -138,8 +139,29 @@ module BattleBossPatterns
         runner = cover_runner
         name = runner[:name]
         dname = cover_dname
+        redirected = true
       end
     end
+
+    if !redirected && ctx[:survive_once] && runner_state
+      # 지정 커버(희생)가 없으면, 이번 라운드 필사즉생을 쓴 사람이 있을 경우
+      # 대신 맞아준다 (파티 전체를 대상으로 하는 공격도 전부 흡수).
+      guardian_name = ctx[:survive_once].to_a.find { |_n, active| active }&.first
+      if guardian_name && guardian_name.to_s != name.to_s
+        guardian_runner = runner_state.find { |r| r[:name].to_s == guardian_name.to_s }
+        if guardian_runner && guardian_runner[:hp].to_i > 0
+          guardian_dname = guardian_runner[:display_name].to_s.strip
+          guardian_dname = guardian_name.to_s if guardian_dname.empty?
+          log << "#{guardian_dname} → [필사즉생] #{dname} 대신 피격"
+          runner = guardian_runner
+          name = runner[:name]
+          dname = guardian_dname
+        end
+      end
+    end
+
+    stats = stats_of ? stats_of.call(name) : {}
+
     hit_detail = BattleCalculator.hit_detail(creature[:tec].to_i)
     log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
     unless hit_detail[:success]
@@ -176,18 +198,18 @@ module BattleBossPatterns
       log << "#{name} 보호막 #{blocked} 흡수"
     end
 
-    # 필사즉생: 이번 턴 건강이 0 이하로 떨어지는 것을 1회 방지.
-    # (기존에는 크리쳐의 기본 반격에만 적용되고, 보스행동커맨드로 지정되는
-    # 실제 패턴 공격에는 반영되지 않던 문제 수정)
+    # 필사즉생: 이번 턴 건강이 0 이하로 떨어지는 것을 방지 (라운드가 끝날 때까지
+    # 몇 번을 대신 맞든 계속 보호되며, 라운드 종료 시 1회 소모로 초기화된다).
     if ctx[:survive_once] && ctx[:survive_once][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
       overkill = dmg > runner[:hp].to_i
       dmg = runner[:hp].to_i - 1
-      ctx[:survive_once].delete(name)
       log << "#{dname}: 필사즉생으로 건강 0 이하 방지"
-      if overkill
+      if overkill && !(stats[:house].to_s.strip == '후플푸프' && stats[:passive].to_s == '2')
         ctx[:survive_penalty] ||= {}
         ctx[:survive_penalty][name] = true
         log << "#{dname}: 받은 피해가 잔여 건강을 초과하여 다음 라운드 행동할 수 없습니다"
+      elsif overkill
+        log << "#{dname}: [후플푸프] 필사즉생 후유증 면제 — 다음 라운드도 정상 행동 가능"
       end
     end
 
