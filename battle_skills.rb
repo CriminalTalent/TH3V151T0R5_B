@@ -33,7 +33,9 @@ module BattleSkills
     '주의분산' => { category: '방어', range: '근접', cooldown: 2, kind: :agi_buff_area, value: 30 },
     '필사즉생' => { category: '방어', range: '-', once: true, kind: :survive_once },
 
-    '물약사용' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 }
+    '물약사용' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 },
+    '디터니 원액' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 30 },
+    '수상한 영약' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 50 }
   }.freeze
 
   module_function
