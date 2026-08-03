@@ -549,7 +549,17 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         original_target = target
         cover_name = ctx[:cover][target[:name]]
         cover = state_of.call(cover_name) if cover_name
-        target = cover if cover && cover[:hp].to_i > 0
+        if cover && cover[:hp].to_i > 0
+          target = cover
+        else
+          # 지정 커버(희생)가 없으면, 이번 라운드 필사즉생을 쓴 사람이
+          # 있을 경우 대신 맞아준다 (파티 전체 대상 공격 흡수).
+          guardian_name = ctx[:survive_once].to_a.find { |_n, active| active }&.first
+          if guardian_name && guardian_name.to_s != target[:name].to_s
+            guardian = state_of.call(guardian_name)
+            target = guardian if guardian && guardian[:hp].to_i > 0
+          end
+        end
         tname = target[:name]
         ts = stats_of.call(tname)
 
@@ -581,12 +591,13 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
             if ctx[:survive_once][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
               overkill = dmg > target[:hp].to_i
               dmg = target[:hp].to_i - 1
-              ctx[:survive_once].delete(tname)
               log << "#{display_name_of.call(tname)}: 필사즉생으로 건강 0 이하 방지"
-              if overkill
+              if overkill && !(ts[:house].to_s.strip == '후플푸프' && ts[:passive].to_s == '2')
                 ctx[:survive_penalty] ||= {}
                 ctx[:survive_penalty][tname] = true
                 log << "#{display_name_of.call(tname)}: 받은 피해가 잔여 건강을 초과하여 다음 라운드 행동할 수 없습니다"
+              elsif overkill
+                log << "#{display_name_of.call(tname)}: [후플푸프] 필사즉생 후유증 면제 — 다음 라운드도 정상 행동 가능"
               end
             elsif ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
                   !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
