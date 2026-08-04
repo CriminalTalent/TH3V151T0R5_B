@@ -63,6 +63,30 @@ def parse_creature_stats_row(row)
   }
 end
 
+# ──────────────────────────────────────────────
+# 보스스킬 시트 캐시
+#
+# 보스스킬 탭은 전투 중 값이 바뀌지 않는 정적 정의 데이터인데,
+# 예전에는 boss_skill_defined?/read_boss_skill_definition이 호출될 때마다
+# (라운드 안내, 보스행동커맨드 파싱 등에서 매우 자주 호출됨) 매번 시트를
+# 새로 읽어와 구글 시트 API 할당량 소모의 큰 원인이 되었다.
+# 봇 프로세스가 살아있는 동안은 1회만 읽고 메모리에 캐시한다.
+# 운영 중 보스스킬 탭을 직접 수정했다면 봇을 재시작하거나,
+# 관리자 명령으로 $boss_skill_cache = nil 처리 후 재호출하면 다시 로드된다.
+# ──────────────────────────────────────────────
+$boss_skill_cache = nil
+
+def load_boss_skill_cache!(creature_sheet)
+  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
+  $boss_skill_cache = rows
+  puts "[전투봇] 보스스킬 캐시 로드 완료 (#{rows.size}행)"
+  rows
+end
+
+def boss_skill_rows(creature_sheet)
+  $boss_skill_cache ||= load_boss_skill_cache!(creature_sheet)
+end
+
 # 보스스킬 탭 최종 구조:
 # A 스킬명, B 분류, C 범위, D 쿨타임, E 배율, F 디버프,
 # G 피해공식, H 범위형태, I 이동회피, J 대상수, K 설명, L 전조
@@ -70,8 +94,7 @@ def read_boss_skill_definition(creature_sheet, skill_name)
   skill_name = skill_name.to_s.strip
   return {} if skill_name.empty? || skill_name == '-'
 
-  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
-  row = rows.find { |r| r[0].to_s.strip == skill_name }
+  row = boss_skill_rows(creature_sheet).find { |r| r[0].to_s.strip == skill_name }
   return {} unless row
 
   {
@@ -174,6 +197,13 @@ end
 def attach_creature_size_from_sheet(creature, creature_sheet)
   name = creature[:name].to_s.strip
   return creature if name.empty?
+
+  # active_creature_from_stats_sheet / creature_from_stats_sheet_by_name을 거쳐
+  # parse_creature_stats_row로 이미 pos/size가 정상 채워진 경우, 같은 스탯 탭을
+  # 다시 읽는 건 완전히 중복 호출이라 건너뛴다. (fallback 경로처럼 pos/size가
+  # 없는 경우에만 실제로 재조회한다)
+  already_loaded = creature[:pos].to_s.match?(/\A[A-G][1-8]\z/) && !creature[:size].to_s.strip.empty?
+  return creature if already_loaded
 
   rows = creature_sheet.read('스탯!A2:Z100') rescue []
   row = rows.find do |r|
@@ -558,8 +588,7 @@ end
 def boss_skill_defined?(creature_sheet, name)
   n = name.to_s.strip
   return false if n.empty?
-  rows = creature_sheet.read('보스스킬!A2:A300') rescue []
-  rows.any? { |r| r[0].to_s.strip == n || r[0].to_s.gsub(/\s+/, '') == n.gsub(/\s+/, '') }
+  boss_skill_rows(creature_sheet).any? { |r| r[0].to_s.strip == n || r[0].to_s.gsub(/\s+/, '') == n.gsub(/\s+/, '') }
 rescue
   false
 end
