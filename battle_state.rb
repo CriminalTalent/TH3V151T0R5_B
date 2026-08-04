@@ -477,7 +477,6 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     processed_messages[username] = true
     processed_id_set.add(processed_id)
     puts "[전투봇] 행동 등록 완료: #{username} → [관찰]"
-    listener.send_dm(username, '확인, 대기해주세요.')
     return
   end
 
@@ -581,7 +580,6 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   processed_id_set.add(processed_id)
 
   puts "[전투봇] 행동 등록 완료: #{username} → [#{action_type}/#{action_target}]"
-  listener.send_dm(username, '확인, 대기해주세요.')
 end
 
 # 보스스킬 탭에 정의된 스킬명인지 확인 (공백 무시 비교 포함)
