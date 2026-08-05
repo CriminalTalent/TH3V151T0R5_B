@@ -51,6 +51,8 @@ module BattleBossPatterns
 
     runner_state.each do |runner|
       name = runner[:name]
+      dname = runner[:display_name].to_s.strip
+      dname = name.to_s if dname.empty?
       next unless runner[:hp].to_i > 0
 
       active = ctx[:debuffs][name].to_a
@@ -61,7 +63,7 @@ module BattleBossPatterns
         when :poison
           dmg = debuff[:value].to_i <= 0 ? 5 : debuff[:value].to_i
           runner[:hp] = [runner[:hp].to_i - dmg, 0].max
-          log << "#{name}: 독 피해 #{dmg}"
+          log << "#{dname}: 독 피해 #{dmg}"
         end
         debuff[:turns] = debuff[:turns].to_i - 1
       end
@@ -78,27 +80,30 @@ module BattleBossPatterns
     }
   end
 
-  def apply_debuff!(log, ctx, target_name, debuff)
+  def apply_debuff!(log, ctx, target_name, debuff, display_name: nil)
     return if target_name.to_s.empty? || debuff.to_s.strip.empty?
+
+    dname = display_name.to_s.strip
+    dname = target_name.to_s if dname.empty?
 
     case debuff.to_s.strip
     when '독'
       ctx[:debuffs] ||= Hash.new { |h, k| h[k] = [] }
       ctx[:debuffs][target_name] << { type: :poison, value: 5, turns: 3 }
-      log << "#{target_name}: 독 부여 (3턴)"
+      log << "#{dname}: 독 부여 (3턴)"
     when '둔화'
       add_stat_debuff!(ctx, target_name, :agi, 10, 2)
-      log << "#{target_name}: 둔화 — 민첩 -10 (2턴)"
+      log << "#{dname}: 둔화 — 민첩 -10 (2턴)"
     when '약화'
       add_stat_debuff!(ctx, target_name, :atk, 10, 2)
-      log << "#{target_name}: 약화 — 마법능력 -10 (2턴)"
+      log << "#{dname}: 약화 — 마법능력 -10 (2턴)"
     when '취약'
       add_stat_debuff!(ctx, target_name, :dur, 10, 2)
-      log << "#{target_name}: 취약 — 내구도 -10 (2턴)"
+      log << "#{dname}: 취약 — 내구도 -10 (2턴)"
     when '기절'
       ctx[:stun] ||= {}
       ctx[:stun][target_name] = 1
-      log << "#{target_name}: 기절 — 다음 행동 불가"
+      log << "#{dname}: 기절 — 다음 행동 불가"
     end
   end
 
@@ -195,7 +200,7 @@ module BattleBossPatterns
       blocked = [shields[name].to_i, dmg].min
       shields[name] -= blocked
       dmg -= blocked
-      log << "#{name} 보호막 #{blocked} 흡수"
+      log << "#{dname} 보호막 #{blocked} 흡수"
     end
 
     # 필사즉생: 이번 턴 건강이 0 이하로 떨어지는 것을 방지 (라운드가 끝날 때까지
@@ -228,15 +233,15 @@ module BattleBossPatterns
       end
     end
 
-    log << "-#{name}"
+    log << "-#{dname}"
     log << "피해:#{dmg}"
     log << "HP: #{runner[:hp].to_i + dmg} → #{runner[:hp]}"
 
-    apply_debuff!(log, ctx, name, debuff)
+    apply_debuff!(log, ctx, name, debuff, display_name: dname)
 
     if runner[:hp].to_i <= 0
       runner[:status] = '전투불가'
-      log << "#{name} 전투불가"
+      log << "#{dname} 전투불가"
     end
 
     dmg
@@ -273,6 +278,11 @@ module BattleBossPatterns
 
   def random_targets(runner_state, count = 1)
     living_runners(runner_state).sample(count.to_i <= 0 ? 1 : count.to_i)
+  end
+
+  def display_label(runner)
+    label = runner[:display_name].to_s.strip
+    label.empty? ? runner[:name].to_s : label
   end
 
   def apply_pattern!(log, runner_state, creature, ctx, stats_of: nil, dur_bonus: nil, defended_multiplier: nil, shields: nil, took_damage: nil, agi_bonus: nil)
@@ -323,51 +333,3 @@ module BattleBossPatterns
         log << '대상 없음'
         log << '피해 없음'
       else
-        targets.each { |runner| apply_debuff!(log, ctx, runner[:name], debuff) }
-      end
-
-      return true
-    end
-
-    # 공격 스킬: 스킬범위 좌표가 있으면 해당 칸, 스킬대상이 있으면 해당 러너.
-    # 둘 다 비어 있으면 기본 공격처럼 살아있는 러너 1명을 무작위 대상으로 삼습니다.
-    targets = []
-    range_label = ''
-
-    if cells.any?
-      targets = targets_by_cells(runner_state, cells)
-      range_label = range_text(cells)
-    elsif !target_name.empty?
-      targets = targets_by_name(runner_state, target_name)
-      range_label = target_name
-    elsif name == '지정공격다인'
-      targets = random_targets(runner_state, target_count(creature))
-      range_label = targets.map { |t| t[:name].to_s }.join(', ')
-    else
-      targets = random_targets(runner_state, 1)
-      range_label = targets.map { |t| t[:name].to_s }.join(', ')
-    end
-
-    log_skill_header(log, creature, name, raw_power, range_label, debuff)
-
-    if targets.empty?
-      log << '대상 없음'
-      log << '피해 없음'
-    else
-      targets.each do |runner|
-        apply_pattern_damage_to_runner!(
-          log, runner, creature, raw_power, debuff, ctx,
-          stats_of: stats_of,
-          dur_bonus: dur_bonus,
-          defended_multiplier: defended_multiplier,
-          shields: shields,
-          took_damage: took_damage,
-          agi_bonus: agi_bonus,
-          runner_state: runner_state
-        )
-      end
-    end
-
-    true
-  end
-end
