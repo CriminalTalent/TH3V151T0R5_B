@@ -1,12 +1,10 @@
-$stdout.sync = true
-$stderr.sync = true
+# encoding: UTF-8
 
-require 'dotenv'
-require 'json'
-require 'time'
-require 'net/http'
-require 'uri'
-require 'set'
+class BattleSession
+  attr_accessor :id, :auto_mode, :mode, :round, :active, :announced, :actions,
+                :start_time, :auto_next_round_timer, :creature, :runner_names,
+                :runner_tags, :processed_messages, :passive_ctx, :thread_reply_id,
+                :thread_ids, :dead_runners, :phase, :awaiting_boss
 
 Dotenv.load(File.join(__dir__, '.env'))
 
@@ -198,56 +196,8 @@ def handle_prep_input(session, username, text, processed_set, processed_id, list
     return
   end
 
-  (session.passive_ctx[:positions] ||= {})[username.to_s] = pos
-  puts "[전투봇] [세션 #{session.id}] 시작 위치 등록: @#{username} → #{pos}"
-end
-
-def check_prep_completion(session, creature_sheet = nil)
-  return unless session.active && session.phase == :prep && session.announced
-
-  ctx = session.passive_ctx
-  required  = (ctx[:prep_required] || session.runner_names).map(&:to_s)
-  positions = ctx[:positions] || {}
-
-  all_set = required.any? && required.all? { |name| positions[name].to_s.match?(/\A[A-G][1-8]\z/) }
-  timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
-  return unless all_set || timeout
-
-  session.awaiting_boss = false
-  session.phase = :announcing
-  ctx[:boss_override] = { skill: '전체공격' }
-  session.announced = false
-  session.actions = {}
-  session.processed_messages = {}
-  session.start_time = Time.now
-  puts "[전투봇] [세션 #{session.id}] 준비 라운드 완료 - #{session.round}라운드 시작 (보스 행동: 전체공격 고정)"
-  positions_text = positions.map { |k, v| "#{k}→#{v}" }.join(', ')
-  sheet_log(creature_sheet, session.id, session.round, '준비 라운드 완료',
-            "시작 위치: #{positions_text} / #{session.round}라운드 시작 (보스 행동: 전체공격 고정)")
-end
-
-def boss_command_text?(text)
-  text.to_s.match?(/\[보스행동커맨드\//)
-end
-
-def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold: false)
-  sender_clean = sender.to_s.gsub('@', '').strip
-  return :pass if sender_clean.empty?
-  return :pass if defined?(BOT_USERNAME) && sender_clean == BOT_USERNAME.to_s.gsub('@', '').strip
-  return :pass if sessions.values.any? { |s| s.includes_runner?(sender_clean) }
-
-  skill = nil
-  args  = nil
-
-  if (m = text.to_s.match(/\[보스행동커맨드\/([^\]]+)\]/))
-    args = m[1]
-  elsif (m = text.to_s.match(/\[([^\/\]]+)(?:\/([^\]]+))?\]/))
-    cand = m[1].to_s.strip
-    return :pass unless boss_skill_defined?(creature_sheet, cand)
-    skill = cand
-    args = m[2]
-  else
-    return :pass
+  def mark_dead_runners(names)
+    @dead_runners = (@dead_runners.to_a | names.map { |n| n.to_s.gsub('@', '').strip }).select { |n| @runner_names.include?(n) }
   end
 
   status_id = status['id'].to_s
@@ -298,23 +248,20 @@ def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold
     end
   end
 
-  tokens = args.to_s.split(%r{[\/,]}).map(&:strip).reject(&:empty?)
-
-  if skill.nil? && tokens.any? && boss_skill_defined?(creature_sheet, tokens.first)
-    skill = tokens.shift
+  def related_to_status?(status)
+    sid = status['id'].to_s
+    rid = status['in_reply_to_id'].to_s
+    @thread_ids.include?(sid) || (!rid.empty? && @thread_ids.include?(rid))
   end
 
-  cells = tokens.select { |t| t.match?(/\A[A-Ga-g][1-8]\z/) }.map(&:upcase)
-
-  if cells.any? && cells.size == tokens.size
-    active_count = sessions.values.count { |s| s.active && s.awaiting_boss && s.id != session.id }
-    if cells.any? || skill == '전체공격'
-      if active_count > 0
-        puts "[전투봇] 보스행동커맨드 거부: 좌표/전체공격은 활성 세션이 유일할 때만 허용됨"
-        sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 거부', "@#{sender_clean}: 좌표/전체공격 (다른 활성 세션 존재)")
-        return :ignored
-      end
-    end
+  def reset_for_next_round!
+    @round += 1
+    @active = true
+    @announced = false
+    @start_time = Time.now
+    @actions = {}
+    @processed_messages = {}
+    @auto_next_round_timer = nil
   end
 
   override = {}
