@@ -49,11 +49,11 @@ end
 def post_battle_thread(text, dm = false, reply_to_id = nil, runner_tags = '')
   visibility = dm ? 'direct' : 'public'
   parts = text.split("\n---SPLIT---\n")
-  chunks = parts.flat_map { |p| split_toot_text(p) }
+  chunks = parts.flat_map { |p| split_toot_text(p) }.reject { |c| c.to_s.strip.empty? }
+  expected_count = chunks.length
   thread_ids = []
   parent_id = reply_to_id
   chunks.each do |chunk|
-    next if chunk.to_s.strip.empty?
     response = if parent_id
       mastodon_client.reply_status(chunk, parent_id, visibility)
     else
@@ -67,10 +67,27 @@ def post_battle_thread(text, dm = false, reply_to_id = nil, runner_tags = '')
     end
     sleep(1.2)
   end
-  thread_ids.length > 0 ? { 'id' => thread_ids.last, 'all_ids' => thread_ids } : nil
+
+  return nil if thread_ids.empty?
+
+  {
+    'id' => thread_ids.last,
+    'all_ids' => thread_ids,
+    'partial' => thread_ids.length < expected_count,
+    'sent_count' => thread_ids.length,
+    'expected_count' => expected_count
+  }
 rescue => e
   puts "[post_battle_thread 오류] #{e.class}: #{e.message}"
-  (defined?(thread_ids) && thread_ids && thread_ids.length > 0) ? { 'id' => thread_ids.last, 'all_ids' => thread_ids } : nil
+  return nil unless defined?(thread_ids) && thread_ids && thread_ids.length > 0
+
+  {
+    'id' => thread_ids.last,
+    'all_ids' => thread_ids,
+    'partial' => true,
+    'sent_count' => thread_ids.length,
+    'expected_count' => defined?(expected_count) ? expected_count : thread_ids.length
+  }
 end
 
 def fetch_public_statuses

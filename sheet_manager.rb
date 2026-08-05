@@ -16,6 +16,27 @@ class SheetManager
     )
   end
 
+  # 429 / 할당량 초과(RateLimitError) 등 일시적 오류에 대해 최대 3회 재시도한다.
+  # (조사봇 sheet_manager.rb에 이미 있던 것과 동일한 패턴 — 이 파일에는 지금까지
+  # 재시도 로직이 아예 없어서, 순간적으로 할당량을 초과하면 재시도 없이 바로
+  # 빈 배열/false로 처리되고 있었다.)
+  def with_retry(label, max_retries: 3)
+    attempt = 0
+    begin
+      yield
+    rescue Google::Apis::RateLimitError, Google::Apis::ServerError, Google::Apis::TransmissionError => e
+      attempt += 1
+      if attempt <= max_retries
+        wait_seconds = 1.5 * attempt
+        puts "[시트 재시도] #{label}: #{e.class} - #{wait_seconds}초 후 재시도 (#{attempt}/#{max_retries})"
+        sleep(wait_seconds)
+        retry
+      else
+        raise
+      end
+    end
+  end
+
   # ──────────────────────────────────────────────
   # 전투로그 탭 기록 (실패해도 봇 동작에는 영향 없음)
   # ──────────────────────────────────────────────
@@ -24,10 +45,12 @@ class SheetManager
 
   def append_battle_log(row)
     body = Google::Apis::SheetsV4::ValueRange.new(values: [row])
-    @service.append_spreadsheet_value(
-      @sheet_id, "#{BATTLE_LOG_SHEET}!A:E", body,
-      value_input_option: 'RAW'
-    )
+    with_retry("추가 #{BATTLE_LOG_SHEET}") do
+      @service.append_spreadsheet_value(
+        @sheet_id, "#{BATTLE_LOG_SHEET}!A:E", body,
+        value_input_option: 'RAW'
+      )
+    end
     true
   rescue => e
     puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
@@ -39,7 +62,9 @@ class SheetManager
   # ──────────────────────────────────────────────
 
   def read(range)
-    @service.get_spreadsheet_values(@sheet_id, range).values || []
+    with_retry("읽기 #{range}") do
+      @service.get_spreadsheet_values(@sheet_id, range).values || []
+    end
   rescue => e
     puts "[시트 읽기 오류] #{range}: #{e.message}"
     []
@@ -47,12 +72,14 @@ class SheetManager
 
   def write(range, values)
     body = Google::Apis::SheetsV4::ValueRange.new(values: values)
-    @service.update_spreadsheet_value(
-      @sheet_id,
-      range,
-      body,
-      value_input_option: 'USER_ENTERED'
-    )
+    with_retry("쓰기 #{range}") do
+      @service.update_spreadsheet_value(
+        @sheet_id,
+        range,
+        body,
+        value_input_option: 'USER_ENTERED'
+      )
+    end
     true
   rescue => e
     puts "[시트 쓰기 오류] #{range}: #{e.message}"
@@ -61,12 +88,14 @@ class SheetManager
 
   def append(range, values)
     body = Google::Apis::SheetsV4::ValueRange.new(values: [values])
-    @service.append_spreadsheet_value(
-      @sheet_id,
-      range,
-      body,
-      value_input_option: 'USER_ENTERED'
-    )
+    with_retry("추가 #{range}") do
+      @service.append_spreadsheet_value(
+        @sheet_id,
+        range,
+        body,
+        value_input_option: 'USER_ENTERED'
+      )
+    end
     true
   rescue => e
     puts "[시트 추가 오류] #{range}: #{e.message}"
@@ -87,7 +116,7 @@ class SheetManager
 
   # 시트 읽기 실패(타임아웃 등) 시 nil을 반환해 호출부가 이전 상태를 유지할 수 있게 합니다.
   def read_bot_on_or_nil
-    rows = @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values || []
+    rows = with_retry("읽기 '실행'!A2") { @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values || [] }
     return false if rows.empty? || rows[0].nil?
     truthy?(rows[0][0])
   rescue => e
@@ -100,7 +129,6 @@ class SheetManager
     return 'direct' if rows.empty? || rows[0].nil? || rows[0][0].to_s.strip.empty?
     truthy?(rows[0][0]) ? 'public' : 'direct'
   end
-
 
   def read_auto_mode
     rows = read("'실행'!C2")
@@ -142,52 +170,76 @@ class SheetManager
   # B 이름
   # C 기숙사
   # D 패시브선택
-  # E 건강
+  # E 건강 (현재체력)
   # F 내구도
   # G 마법능력
   # H 민첩
   # I 기술
   # J 행운
-  # K 스킬1
+  # K 최대건강 (최대체력의 유일한 출처)
   # L 스킬2
   # M facing
   #
   # E열 건강은 전투 중 현재 체력으로 갱신합니다.
-  # 최대체력은 전투 세션 시작 시 읽은 건강값을 battle_round.rb의 ctx에 보존합니다.
+  # 최대체력은 항상 K열(최대건강)에서 읽습니다 (E열로 대체하지 않음).
+  #
+  # read_base_stats는 한 라운드 처리(안내/보스행동커맨드 파싱/정산) 중
+  # 여러 지점에서 각각 독립적으로 호출되어 '스탯'!A2:M100 읽기가 짧은
+  # 간격에 중복 발생하는 게 확인되어, 짧은 TTL 캐시를 추가했습니다.
+  # HP(E열)는 라운드 중 세션 메모리(ctx) 상태를 기준으로 판정하므로,
+  # 이 캐시가 몇 초 지연되어도 실제 판정 결과에는 영향이 없습니다.
   # ──────────────────────────────────────────────
 
   def read_base_stats
-    rows = read("'스탯'!A2:M100")
+    now = Time.now
+    if @base_stats_cache.nil? || @base_stats_cache_at.nil? || (now - @base_stats_cache_at) > 5
+      rows = read("'스탯'!A2:M100")
 
-    rows.map do |row|
-      id = row[0].to_s.strip
-      next if id.empty?
+      @base_stats_cache = rows.map do |row|
+        id = row[0].to_s.strip
+        next if id.empty?
 
-      # E열이 비어있거나 숫자가 아니면 기본 50, "0"이면 전투불가(0) 그대로 유지
-      hp_raw = row[4].to_s.strip
-      hp = hp_raw.match?(/\A-?\d+\z/) ? [hp_raw.to_i, 0].max : 50
+        # E열이 비어있거나 숫자가 아니면 기본 50, "0"이면 전투불가(0) 그대로 유지
+        hp_raw = row[4].to_s.strip
+        hp = hp_raw.match?(/\A-?\d+\z/) ? [hp_raw.to_i, 0].max : 50
 
-      {
-        name:         id,
-        id:           id,
-        display_name: row[1].to_s.strip,
-        house:        row[2].to_s.strip,
-        passive:      row[3].to_s.strip,
-        hp:           hp,
-        max_hp:       hp,
-        dur:          row[5].to_i,
-        atk:          row[6].to_i,
-        agi:          row[7].to_i,
-        tec:          row[8].to_i,
-        luck:         row[9].to_i,
-        skill1:       row[10].to_s.strip,
-        skill2:       row[11].to_s.strip,
-        facing:       row[12].to_s.strip.empty? ? '하' : row[12].to_s.strip
-      }
-    end.compact
+        # K열(최대건강)이 최대체력의 유일한 출처. 비어있거나 0 이하면 현재체력으로 대체.
+        max_hp_raw = row[10].to_s.strip
+        max_hp = max_hp_raw.match?(/\A-?\d+\z/) ? max_hp_raw.to_i : 0
+        max_hp = hp if max_hp <= 0
+
+        {
+          name:         id,
+          id:           id,
+          display_name: row[1].to_s.strip,
+          house:        row[2].to_s.strip,
+          passive:      row[3].to_s.strip,
+          hp:           hp,
+          max_hp:       max_hp,
+          dur:          row[5].to_i,
+          atk:          row[6].to_i,
+          agi:          row[7].to_i,
+          tec:          row[8].to_i,
+          luck:         row[9].to_i,
+          skill2:       row[11].to_s.strip,
+          facing:       row[12].to_s.strip.empty? ? '하' : row[12].to_s.strip
+        }
+      end.compact
+
+      @base_stats_cache_at = now
+    end
+
+    @base_stats_cache
   rescue => e
     puts "[read_base_stats 오류] #{e.message}"
-    []
+    @base_stats_cache || []
+  end
+
+  # HP를 시트에 실제로 반영한 직후에는 캐시를 즉시 무효화해,
+  # 그다음 read_base_stats 호출이 방금 쓴 값을 곧바로 반영하도록 합니다.
+  def invalidate_base_stats_cache!
+    @base_stats_cache = nil
+    @base_stats_cache_at = nil
   end
 
   def read_creature_stats(creature_name)
@@ -209,10 +261,13 @@ class SheetManager
     hp = row[1].to_i if hp <= 0 && numeric?(row[1])
     hp = 200 if hp <= 0
 
+    max_hp = row[10].to_i
+    max_hp = hp if max_hp <= 0
+
     {
       name:    creature_name,
       hp:      hp,
-      max_hp:  hp,
+      max_hp:  max_hp,
       dur:     stat_value(row, 5, 3, 10),
       atk:     stat_value(row, 6, 2, 10),
       agi:     stat_value(row, 7, 4, 0),
@@ -283,7 +338,9 @@ class SheetManager
       end
     end
 
-    write("'스탯'!E2:E#{rows.size + 1}", values)
+    result = write("'스탯'!E2:E#{rows.size + 1}", values)
+    invalidate_base_stats_cache!
+    result
   rescue => e
     puts "[update_runner_state 오류] #{e.message}"
     false

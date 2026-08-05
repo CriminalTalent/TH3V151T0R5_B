@@ -7,37 +7,6 @@
 def stat_bonus(ctx, name, stat)
   ctx[:buffs][name].to_a.select { |b| b[:stat] == stat }.sum { |b| b[:value].to_i }
 end
-def cooldown_ready?(ctx, name, skill_name, skill)
-  return true if skill[:once]
-  cd = skill[:cooldown].to_i
-  return true if cd <= 0
-  ctx[:cooldowns][name][skill_name].to_i <= 0
-end
-def prepare_rush_moves!(battle_actions, runner_state, creature, ctx, state_of)
-  moves = {}
-  battle_actions.each do |name, act|
-    skill_name = act[:type]
-    skill = BattleSkills.get(skill_name)
-    next unless skill && skill[:kind] == :rush
-    actor = state_of.call(name)
-    next unless actor && actor[:hp].to_i > 0
-    next unless cooldown_ready?(ctx, name, skill_name, skill)
-    parts = skill_parts(act[:target])
-    dest = parts[1].to_s.upcase
-    next unless BattleGrid.valid_pos?(dest)
-    old_pos = actor[:pos]
-    dist = BattleGrid.distance(old_pos, dest).to_i
-    multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
-    if BattleGrid.line_clear?(old_pos, dest, runner_state, creature, actor_name: name)
-      actor[:pos] = dest
-      (ctx[:positions] ||= {})[name.to_s] = dest
-      moves[name] = { old_pos: old_pos, dest: dest, multiplier: multiplier, moved: true }
-    else
-      moves[name] = { old_pos: old_pos, dest: dest, multiplier: multiplier, moved: false }
-    end
-  end
-  moves
-end
 
 def cleanup_buffs!(ctx)
   ctx[:buffs].each do |name, buffs|
@@ -156,7 +125,6 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   took_damage = {}
 
   BattleBossPatterns.apply_ongoing_debuffs!(log, runner_state, ctx)
-  rush_moves = prepare_rush_moves!(battle_actions, runner_state, creature, ctx, state_of)
 
   atk_bonus  = Hash.new(0)
   dur_bonus  = Hash.new(0)
@@ -203,9 +171,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         atk_bonus[name] += b
         passive_lines << "#{display_name_of.call(name)}: [래번클로] 적 상태이상 감지 — 마법능력 +#{b}"
       elsif s[:passive] == '2'
-        prev_cat = BattleSkills.category(ctx[:prev_action][name])
-        cur_cat  = BattleSkills.category(battle_actions[name]&.dig(:type))
-        if prev_cat && cur_cat && prev_cat != cur_cat
+        prev = ctx[:prev_action][name]
+        cur  = battle_actions[name]&.dig(:type)
+        if prev && cur && prev != cur
           tec_bonus[name] += 10
           passive_lines << "#{display_name_of.call(name)}: [래번클로] 행동 분류 변경 — 기술 +10"
         end
@@ -283,8 +251,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       end
       log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :atk_buff_area
-      base_amount = s[:atk].to_i + atk_bonus[name]
-      amount = (base_amount * skill[:ratio].to_f).ceil
+      amount = (s[:atk].to_i * skill[:ratio].to_f).ceil
       affected = []
       runner_state.each do |r|
         next unless r[:hp].to_i > 0 && runner_names.include?(r[:name])
@@ -455,10 +422,17 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     # 먼저 이동부터 처리합니다. 공격이 빗나가도 돌진 자체는 이미 일어난
     # 행동이므로 제자리로 남지 않습니다.
     if rush_attack
-      info = rush_moves[name]
-      if info
-        multiplier = info[:multiplier]
-        log << "#{display_name_of.call(name)}의 습격 이동 #{info[:old_pos]} → #{info[:dest]}" if info[:moved]
+      rush_parts = skill_parts(act[:target])
+      dest = rush_parts[1].to_s.upcase
+      if BattleGrid.valid_pos?(dest)
+        dist = BattleGrid.distance(actor[:pos], dest).to_i
+        multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
+        if BattleGrid.line_clear?(actor[:pos], dest, runner_state, creature, actor_name: name)
+          old_pos = actor[:pos]
+          actor[:pos] = dest
+          (ctx[:positions] ||= {})[name.to_s] = dest
+          log << "#{display_name_of.call(name)}의 습격 이동 #{old_pos} → #{dest}"
+        end
       end
     end
 
@@ -604,8 +578,18 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
               log << "#{display_name_of.call(tname)} 보호막 #{blocked} 흡수"
             end
 
-            if ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
-               !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
+            if ctx[:survive_once][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
+              overkill = dmg > target[:hp].to_i
+              dmg = target[:hp].to_i - 1
+              ctx[:survive_once].delete(tname)
+              log << "#{display_name_of.call(tname)}: 필사즉생으로 건강 0 이하 방지"
+              if overkill
+                ctx[:survive_penalty] ||= {}
+                ctx[:survive_penalty][tname] = true
+                log << "#{display_name_of.call(tname)}: 받은 피해가 잔여 건강을 초과하여 다음 라운드 행동할 수 없습니다"
+              end
+            elsif ts[:house].to_s.strip == '후플푸프' && ts[:passive] == '2' &&
+                  !ctx[:guard_used][tname] && target[:hp].to_i - dmg <= 0 && dmg > 0
               dmg = target[:hp].to_i - 1
               ctx[:guard_used][tname] = true
               log << "#{display_name_of.call(tname)}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
@@ -649,42 +633,6 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     end
   end
 
-  ctx[:indomitable_buffer].to_a.each do |name, total_power|
-    next if total_power.to_i <= 0
-    guardian = state_of.call(name)
-    next unless guardian && guardian[:hp].to_i > 0
-    gs = stats_of.call(name)
-    eff_dur = (gs[:dur].to_i + dur_bonus[name]) * defended_multiplier[name]
-    dmg = BattleCalculator.calc_damage(total_power.to_i, eff_dur.to_i)
-    if shields[name].to_i > 0 && dmg > 0
-      blocked = [shields[name], dmg].min
-      shields[name] -= blocked
-      dmg -= blocked
-      log << "#{display_name_of.call(name)} 보호막 #{blocked} 흡수"
-    end
-    if guardian[:hp].to_i - dmg <= 0 && dmg > 0
-      dmg = guardian[:hp].to_i - 1
-      log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지)"
-    else
-      log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg}"
-    end
-    guardian[:hp] = [guardian[:hp].to_i - dmg, 0].max
-    took_damage[name] = true if dmg > 0
-    if ctx[:revenge][name] && dmg > 0
-      rev_by = ctx[:revenge][name][:by]
-      rev_actor = state_of.call(rev_by)
-      if rev_actor && rev_actor[:hp].to_i > 0
-        rev_dmg = BattleCalculator.calc_damage((dmg * ctx[:revenge][name][:multiplier]).ceil, creature[:dur].to_i)
-        creature[:hp] = [creature[:hp].to_i - rev_dmg, 0].max
-        log << "#{display_name_of.call(rev_by)}의 복수 → #{creature[:name]}에게 #{rev_dmg} 반격 피해"
-      end
-    end
-    if guardian[:hp].to_i <= 0
-      guardian[:status] = '전투불가'
-      log << "#{display_name_of.call(name)} 전투불가"
-    end
-  end
-
   ctx[:prev_took_damage] = took_damage
   battle_actions.each { |name, act| ctx[:prev_action][name] = act[:type] }
   cleanup_buffs!(ctx)
@@ -693,7 +641,6 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   ctx[:revenge] = {}
   ctx[:sure_hit] = {}
   ctx[:survive_once] = {}
-  ctx[:indomitable_buffer] = Hash.new(0)
 
   view_sheet.update_runner_state(runner_state)
   [log, runner_state]

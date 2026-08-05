@@ -16,6 +16,7 @@ def new_passive_ctx
     revenge: {},
     cover: {},
     survive_once: {},
+    indomitable_buffer: Hash.new(0),
     debuffs: Hash.new { |h, k| h[k] = [] },
     stun: {}
   }

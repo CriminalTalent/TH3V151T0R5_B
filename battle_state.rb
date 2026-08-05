@@ -20,6 +20,7 @@ def parse_creature_stats_row(row)
   # J 기술
   # K 행운
   # L 비고
+  # M 보상크레딧 (처치 시 파티 전원에게 지급, 비어있으면 0)
   name = row[1].to_s.strip
   return nil if name.empty?
 
@@ -27,10 +28,18 @@ def parse_creature_stats_row(row)
   hp = 200 if hp <= 0
 
   current_skill = row[4].to_s.strip
+  reward_raw = row[12].to_s.strip
+  reward = reward_raw.match?(/\A-?\d+\z/) ? reward_raw.to_i : 0
+
+  # 전투봇 격자는 A~G, 1~8 범위뿐이다. 조사맵 좌표(H~O 등) 같이 범위 밖 값이
+  # 잘못 들어와 있으면 사거리/이동 계산이 깨지므로 기본값(D4)으로 보정한다.
+  raw_pos = row[2].to_s.strip.upcase
+  pos = raw_pos.match?(/\A[A-G][1-8]\z/) ? raw_pos : 'D4'
+  puts "[전투봇] 크리쳐 '#{name}' 위치 '#{raw_pos}'가 전투 격자 범위(A~G,1~8) 밖이라 D4로 보정했습니다." if !raw_pos.empty? && pos != raw_pos
 
   {
     name:    name,
-    pos:     row[2].to_s.strip.upcase.empty? ? 'D4' : row[2].to_s.strip.upcase,
+    pos:     pos,
     size:    row[3].to_s.strip.downcase.empty? ? '1x1' : row[3].to_s.strip.downcase,
     hp:      hp,
     max_hp:  hp,
@@ -49,8 +58,33 @@ def parse_creature_stats_row(row)
     pattern_multiplier: '',
     pattern_cooldown: '',
     note: row[11].to_s.strip,
+    reward: reward,
     status: ''
   }
+end
+
+# ──────────────────────────────────────────────
+# 보스스킬 시트 캐시
+#
+# 보스스킬 탭은 전투 중 값이 바뀌지 않는 정적 정의 데이터인데,
+# 예전에는 boss_skill_defined?/read_boss_skill_definition이 호출될 때마다
+# (라운드 안내, 보스행동커맨드 파싱 등에서 매우 자주 호출됨) 매번 시트를
+# 새로 읽어와 구글 시트 API 할당량 소모의 큰 원인이 되었다.
+# 봇 프로세스가 살아있는 동안은 1회만 읽고 메모리에 캐시한다.
+# 운영 중 보스스킬 탭을 직접 수정했다면 봇을 재시작하거나,
+# 관리자 명령으로 $boss_skill_cache = nil 처리 후 재호출하면 다시 로드된다.
+# ──────────────────────────────────────────────
+$boss_skill_cache = nil
+
+def load_boss_skill_cache!(creature_sheet)
+  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
+  $boss_skill_cache = rows
+  puts "[전투봇] 보스스킬 캐시 로드 완료 (#{rows.size}행)"
+  rows
+end
+
+def boss_skill_rows(creature_sheet)
+  $boss_skill_cache ||= load_boss_skill_cache!(creature_sheet)
 end
 
 # 보스스킬 탭 최종 구조:
@@ -60,8 +94,7 @@ def read_boss_skill_definition(creature_sheet, skill_name)
   skill_name = skill_name.to_s.strip
   return {} if skill_name.empty? || skill_name == '-'
 
-  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
-  row = rows.find { |r| r[0].to_s.strip == skill_name }
+  row = boss_skill_rows(creature_sheet).find { |r| r[0].to_s.strip == skill_name }
   return {} unless row
 
   {
@@ -165,6 +198,13 @@ def attach_creature_size_from_sheet(creature, creature_sheet)
   name = creature[:name].to_s.strip
   return creature if name.empty?
 
+  # active_creature_from_stats_sheet / creature_from_stats_sheet_by_name을 거쳐
+  # parse_creature_stats_row로 이미 pos/size가 정상 채워진 경우, 같은 스탯 탭을
+  # 다시 읽는 건 완전히 중복 호출이라 건너뛴다. (fallback 경로처럼 pos/size가
+  # 없는 경우에만 실제로 재조회한다)
+  already_loaded = creature[:pos].to_s.match?(/\A[A-G][1-8]\z/) && !creature[:size].to_s.strip.empty?
+  return creature if already_loaded
+
   rows = creature_sheet.read('스탯!A2:Z100') rescue []
   row = rows.find do |r|
     r[1].to_s.strip == name || r[0].to_s.strip == name
@@ -255,16 +295,18 @@ def build_fallback_runner_state(runner_names, runner_sheet, default_pos)
   base_stats = runner_sheet.read_base_stats
 
   runner_names.map do |name|
-    stat = base_stats.find { |s| s[:name].to_s == name.to_s || s[:id].to_s == name.to_s }
+    stat = base_stats.find { |s| s[:name].to_s.casecmp?(name.to_s) || s[:id].to_s.casecmp?(name.to_s) }
     hp = stat ? [stat[:hp].to_i, 0].max : 50
+    max_hp = stat && stat[:max_hp].to_i > 0 ? stat[:max_hp].to_i : hp
 
     {
-      name:    name,
-      pos:     'D3',
-      hp:      hp,
-      max_hp:  hp,
-      status:  '',
-      facing:  stat && stat[:facing].to_s.strip.empty? == false ? stat[:facing] : '하'
+      name:         name,
+      display_name: stat && stat[:display_name],
+      pos:          'D3',
+      hp:           hp,
+      max_hp:       max_hp,
+      status:       '',
+      facing:       stat && stat[:facing].to_s.strip.empty? == false ? stat[:facing] : '하'
     }
   end
 rescue => e
@@ -435,7 +477,6 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     processed_messages[username] = true
     processed_id_set.add(processed_id)
     puts "[전투봇] 행동 등록 완료: #{username} → [관찰]"
-    listener.send_dm(username, '확인, 대기해주세요.')
     return
   end
 
@@ -539,15 +580,13 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   processed_id_set.add(processed_id)
 
   puts "[전투봇] 행동 등록 완료: #{username} → [#{action_type}/#{action_target}]"
-  listener.send_dm(username, '확인, 대기해주세요.')
 end
 
 # 보스스킬 탭에 정의된 스킬명인지 확인 (공백 무시 비교 포함)
 def boss_skill_defined?(creature_sheet, name)
   n = name.to_s.strip
   return false if n.empty?
-  rows = creature_sheet.read('보스스킬!A2:A300') rescue []
-  rows.any? { |r| r[0].to_s.strip == n || r[0].to_s.gsub(/\s+/, '') == n.gsub(/\s+/, '') }
+  boss_skill_rows(creature_sheet).any? { |r| r[0].to_s.strip == n || r[0].to_s.gsub(/\s+/, '') == n.gsub(/\s+/, '') }
 rescue
   false
 end
