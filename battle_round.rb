@@ -575,17 +575,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         original_target = target
         cover_name = ctx[:cover][target[:name]]
         cover = state_of.call(cover_name) if cover_name
-        if cover && cover[:hp].to_i > 0
-          target = cover
-        else
-          # 지정 커버(희생)가 없으면, 이번 라운드 필사즉생을 쓴 사람이
-          # 있을 경우 대신 맞아준다 (파티 전체 대상 공격 흡수).
-          guardian_name = ctx[:survive_once].to_a.find { |_n, active| active }&.first
-          if guardian_name && guardian_name.to_s != target[:name].to_s
-            guardian = state_of.call(guardian_name)
-            target = guardian if guardian && guardian[:hp].to_i > 0
-          end
-        end
+        target = cover if cover && cover[:hp].to_i > 0
         tname = target[:name]
         ts = stats_of.call(tname)
 
