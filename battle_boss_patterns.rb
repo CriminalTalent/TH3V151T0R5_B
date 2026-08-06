@@ -128,7 +128,7 @@ module BattleBossPatterns
     cells.to_a.map(&:to_s).map(&:upcase).reject(&:empty?).join(' · ')
   end
 
-  def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil)
+  def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil, multi_target: false)
     name = runner[:name]
     dname = runner[:display_name].to_s.strip
     dname = name.to_s if dname.empty?
@@ -148,19 +148,20 @@ module BattleBossPatterns
       end
     end
 
-    if !redirected && ctx[:survive_once] && runner_state
-      # 지정 커버(희생)가 없으면, 이번 라운드 필사즉생을 쓴 사람이 있을 경우
-      # 대신 맞아준다 (파티 전체를 대상으로 하는 공격도 전부 흡수).
+    if !redirected && multi_target && ctx[:survive_once] && runner_state
+      # 다인 대상 공격(전체공격/범위공격/지정공격다인)만 필사즉생이 흡수한다.
+      # 회피 판정 없이 무조건 흡수하며, 위력은 즉시 정산하지 않고 버퍼에 모아뒀다가
+      # 라운드 종료 시 유효 내구도를 1번만 적용해 최종 피해를 계산한다.
       guardian_name = ctx[:survive_once].to_a.find { |_n, active| active }&.first
-      if guardian_name && guardian_name.to_s != name.to_s
+      if guardian_name
         guardian_runner = runner_state.find { |r| r[:name].to_s == guardian_name.to_s }
         if guardian_runner && guardian_runner[:hp].to_i > 0
           guardian_dname = guardian_runner[:display_name].to_s.strip
           guardian_dname = guardian_name.to_s if guardian_dname.empty?
-          log << "#{guardian_dname} → [필사즉생] #{dname} 대신 피격"
-          runner = guardian_runner
-          name = runner[:name]
-          dname = guardian_dname
+          ctx[:indomitable_buffer][guardian_name] = ctx[:indomitable_buffer][guardian_name].to_i + raw_power.to_i
+          log << "#{guardian_dname} → [필사즉생] #{dname} 대신 흡수 (판정은 라운드 종료 시 일괄 정산)"
+          log << ''
+          return 0
         end
       end
     end
@@ -201,21 +202,6 @@ module BattleBossPatterns
       shields[name] -= blocked
       dmg -= blocked
       log << "#{dname} 보호막 #{blocked} 흡수"
-    end
-
-    # 필사즉생: 이번 턴 건강이 0 이하로 떨어지는 것을 방지 (라운드가 끝날 때까지
-    # 몇 번을 대신 맞든 계속 보호되며, 라운드 종료 시 1회 소모로 초기화된다).
-    if ctx[:survive_once] && ctx[:survive_once][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
-      overkill = dmg > runner[:hp].to_i
-      dmg = runner[:hp].to_i - 1
-      log << "#{dname}: 필사즉생으로 건강 0 이하 방지"
-      if overkill && !(stats[:house].to_s.strip == '후플푸프' && stats[:passive].to_s == '2')
-        ctx[:survive_penalty] ||= {}
-        ctx[:survive_penalty][name] = true
-        log << "#{dname}: 받은 피해가 잔여 건강을 초과하여 다음 라운드 행동할 수 없습니다"
-      elsif overkill
-        log << "#{dname}: [후플푸프] 필사즉생 후유증 면제 — 다음 라운드도 정상 행동 가능"
-      end
     end
 
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
@@ -315,7 +301,8 @@ module BattleBossPatterns
             shields: shields,
             took_damage: took_damage,
             agi_bonus: agi_bonus,
-            runner_state: runner_state
+            runner_state: runner_state,
+            multi_target: true
           )
         end
       end
@@ -344,15 +331,18 @@ module BattleBossPatterns
     targets = []
     range_label = ''
 
+    multi_target = false
     if cells.any?
       targets = targets_by_cells(runner_state, cells)
       range_label = range_text(cells)
+      multi_target = true
     elsif !target_name.empty?
       targets = targets_by_name(runner_state, target_name)
       range_label = target_name
     elsif name == '지정공격다인'
       targets = random_targets(runner_state, target_count(creature))
       range_label = targets.map { |t| display_label(t) }.join(', ')
+      multi_target = true
     else
       targets = random_targets(runner_state, 1)
       range_label = targets.map { |t| display_label(t) }.join(', ')
@@ -373,7 +363,8 @@ module BattleBossPatterns
           shields: shields,
           took_damage: took_damage,
           agi_bonus: agi_bonus,
-          runner_state: runner_state
+          runner_state: runner_state,
+          multi_target: multi_target
         )
       end
     end
