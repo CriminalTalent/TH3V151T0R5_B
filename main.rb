@@ -1,10 +1,12 @@
-# encoding: UTF-8
+$stdout.sync = true
+$stderr.sync = true
 
-class BattleSession
-  attr_accessor :id, :auto_mode, :mode, :round, :active, :announced, :actions,
-                :start_time, :auto_next_round_timer, :creature, :runner_names,
-                :runner_tags, :processed_messages, :passive_ctx, :thread_reply_id,
-                :thread_ids, :dead_runners, :phase, :awaiting_boss
+require 'dotenv'
+require 'json'
+require 'time'
+require 'net/http'
+require 'uri'
+require 'set'
 
 Dotenv.load(File.join(__dir__, '.env'))
 
@@ -196,8 +198,56 @@ def handle_prep_input(session, username, text, processed_set, processed_id, list
     return
   end
 
-  def mark_dead_runners(names)
-    @dead_runners = (@dead_runners.to_a | names.map { |n| n.to_s.gsub('@', '').strip }).select { |n| @runner_names.include?(n) }
+  (session.passive_ctx[:positions] ||= {})[username.to_s] = pos
+  puts "[전투봇] [세션 #{session.id}] 시작 위치 등록: @#{username} → #{pos}"
+end
+
+def check_prep_completion(session, creature_sheet = nil)
+  return unless session.active && session.phase == :prep && session.announced
+
+  ctx = session.passive_ctx
+  required  = (ctx[:prep_required] || session.runner_names).map(&:to_s)
+  positions = ctx[:positions] || {}
+
+  all_set = required.any? && required.all? { |name| positions[name].to_s.match?(/\A[A-G][1-8]\z/) }
+  timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
+  return unless all_set || timeout
+
+  session.awaiting_boss = false
+  session.phase = :announcing
+  ctx[:boss_override] = { skill: '전체공격' }
+  session.announced = false
+  session.actions = {}
+  session.processed_messages = {}
+  session.start_time = Time.now
+  puts "[전투봇] [세션 #{session.id}] 준비 라운드 완료 - #{session.round}라운드 시작 (보스 행동: 전체공격 고정)"
+  positions_text = positions.map { |k, v| "#{k}→#{v}" }.join(', ')
+  sheet_log(creature_sheet, session.id, session.round, '준비 라운드 완료',
+            "시작 위치: #{positions_text} / #{session.round}라운드 시작 (보스 행동: 전체공격 고정)")
+end
+
+def boss_command_text?(text)
+  text.to_s.match?(/\[보스행동커맨드\//)
+end
+
+def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold: false)
+  sender_clean = sender.to_s.gsub('@', '').strip
+  return :pass if sender_clean.empty?
+  return :pass if defined?(BOT_USERNAME) && sender_clean == BOT_USERNAME.to_s.gsub('@', '').strip
+  return :pass if sessions.values.any? { |s| s.includes_runner?(sender_clean) }
+
+  skill = nil
+  args  = nil
+
+  if (m = text.to_s.match(/\[보스행동커맨드\/([^\]]+)\]/))
+    args = m[1]
+  elsif (m = text.to_s.match(/\[([^\/\]]+)(?:\/([^\]]+))?\]/))
+    cand = m[1].to_s.strip
+    return :pass unless boss_skill_defined?(creature_sheet, cand)
+    skill = cand
+    args = m[2]
+  else
+    return :pass
   end
 
   status_id = status['id'].to_s
@@ -248,20 +298,23 @@ def handle_prep_input(session, username, text, processed_set, processed_id, list
     end
   end
 
-  def related_to_status?(status)
-    sid = status['id'].to_s
-    rid = status['in_reply_to_id'].to_s
-    @thread_ids.include?(sid) || (!rid.empty? && @thread_ids.include?(rid))
+  tokens = args.to_s.split(%r{[\/,]}).map(&:strip).reject(&:empty?)
+
+  if skill.nil? && tokens.any? && boss_skill_defined?(creature_sheet, tokens.first)
+    skill = tokens.shift
   end
 
-  def reset_for_next_round!
-    @round += 1
-    @active = true
-    @announced = false
-    @start_time = Time.now
-    @actions = {}
-    @processed_messages = {}
-    @auto_next_round_timer = nil
+  cells = tokens.select { |t| t.match?(/\A[A-Ga-g][1-8]\z/) }.map(&:upcase)
+
+  if cells.any? && cells.size == tokens.size
+    active_count = sessions.values.count { |s| s.active && s.awaiting_boss && s.id != session.id }
+    if cells.any? || skill == '전체공격'
+      if active_count > 0
+        puts "[전투봇] 보스행동커맨드 거부: 좌표/전체공격은 활성 세션이 유일할 때만 허용됨"
+        sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 거부', "@#{sender_clean}: 좌표/전체공격 (다른 활성 세션 존재)")
+        return :ignored
+      end
+    end
   end
 
   override = {}
@@ -385,15 +438,6 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
     r[:display_name] = label.empty? ? r[:name].to_s : label
   end
   session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
-
-  if ctx[:survive_penalty] && ctx[:survive_penalty].any?
-    ctx[:survive_penalty].each_key do |name|
-      next unless session.runner_names.include?(name)
-      next if session.dead_runners.to_a.include?(name)
-      session.actions[name] = { type: '필사즉생 후유증', target: '' }
-    end
-    ctx[:survive_penalty] = {}
-  end
 
   refresh_creature_skill!(session.creature, creature_sheet)
   creature = session.creature
@@ -877,8 +921,11 @@ loop do
 
         target = find_session_for_action(sessions, username, last_status)
         if target.nil?
-          active_sessions = sessions.values.select(&:active)
-          target = active_sessions.first if active_sessions.length == 1
+          # 발신자가 실제로 참여 중인 세션만 자동 매칭한다.
+          # (활성 세션이 우연히 1개뿐이라는 이유로 무관한 세션을 종료시키던
+          #  폴백은 제거 — 다른 팀 전투가 함께 끝나는 사고의 원인이었다.)
+          runner_sessions = sessions.values.select { |s| s.active && s.includes_runner?(username) }
+          target = runner_sessions.first if runner_sessions.length == 1
         end
 
         if target
@@ -992,7 +1039,12 @@ loop do
         active_sessions = sessions.values.select(&:active)
         target = active_sessions.find { |s| s.related_to_status?(status) }
 
-        target ||= active_sessions.first if active_sessions.length == 1
+        # 타래로 특정되지 않으면 발신자가 참여 중인 세션만 자동 매칭한다.
+        # (활성 세션이 1개뿐이라는 이유만으로 무관한 세션을 종료시키지 않는다.)
+        if target.nil?
+          runner_sessions = active_sessions.select { |s| s.includes_runner?(pub_sender) }
+          target = runner_sessions.first if runner_sessions.length == 1
+        end
 
         if target
           target.active = false
@@ -1109,8 +1161,6 @@ loop do
 
           target = runner_sessions.first if runner_sessions.length == 1
         end
-
-        target ||= active_sessions.first if active_sessions.length == 1
 
         if target
           target.active = false
