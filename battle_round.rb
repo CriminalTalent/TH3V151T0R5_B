@@ -155,6 +155,44 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   log = []
   took_damage = {}
 
+  escaped_name = nil
+  battle_actions.each do |name, act|
+    skill_name = act[:type]
+    skill = BattleSkills.get(skill_name)
+    next unless skill && BattleSkills.escape?(skill_name)
+
+    actor = state_of.call(name)
+    next unless actor && actor[:hp].to_i > 0
+
+    dname = display_name_of.call(name)
+    rate = (skill[:success_rate].to_f * 100).round
+    roll = rand(1..100)
+    success = roll <= rate
+
+    if skill_name == '말걸기'
+      if success
+        line = TalkLines.success_line(creature[:name])
+        log << "#{dname}의 말걸기 → #{creature[:name]}: \"#{line}\""
+      else
+        log << "#{dname}의 말걸기 → 말이 통하지 않는다!"
+      end
+    else
+      log << "#{dname}의 #{skill_name} → #{success ? '성공! 전투에서 벗어났다.' : '실패. 벗어나지 못했다.'}"
+    end
+
+    if success
+      escaped_name = name
+      break
+    end
+  end
+
+  if escaped_name
+    ctx[:escaped_by] = escaped_name
+    battle_actions.each { |name, act| ctx[:prev_action][name] = act[:type] }
+    view_sheet.update_runner_state(runner_state)
+    return [log, runner_state]
+  end
+
   BattleBossPatterns.apply_ongoing_debuffs!(log, runner_state, ctx)
   rush_moves = prepare_rush_moves!(battle_actions, runner_state, creature, ctx, state_of)
 
@@ -575,17 +613,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         original_target = target
         cover_name = ctx[:cover][target[:name]]
         cover = state_of.call(cover_name) if cover_name
-        if cover && cover[:hp].to_i > 0
-          target = cover
-        else
-          # 지정 커버(희생)가 없으면, 이번 라운드 필사즉생을 쓴 사람이
-          # 있을 경우 대신 맞아준다 (파티 전체 대상 공격 흡수).
-          guardian_name = ctx[:survive_once].to_a.find { |_n, active| active }&.first
-          if guardian_name && guardian_name.to_s != target[:name].to_s
-            guardian = state_of.call(guardian_name)
-            target = guardian if guardian && guardian[:hp].to_i > 0
-          end
-        end
+        target = cover if cover && cover[:hp].to_i > 0
         tname = target[:name]
         ts = stats_of.call(tname)
 

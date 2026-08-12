@@ -146,6 +146,142 @@ module ScoutDirections
     lines.join("\n")
   end
 
+  # "장소" 시트에서 좌표 하나의 전체 정보(이름/지문/선택지/오브젝트)를 읽는다.
+  # 조사봇 sheet_manager.rb의 find_location_in과 동일한 그룹핑 규칙을 사용한다
+  # (읽기 전용 조회이며, 조사봇 코드/시트 구조는 건드리지 않는다).
+  def find_location_full(scout_sheet, grid_sheet, coord)
+    find_location_full_in(scout_sheet, coord) || find_location_full_in(grid_sheet, coord)
+  end
+
+  def find_location_full_in(sheet, coord)
+    return nil unless sheet
+
+    rows = sheet.read("'장소'!A:S")
+    return nil if rows.empty?
+
+    idx = header_index(rows[0])
+    pos_col           = idx['위치'] || 0
+    name_col          = idx['이름'] || 1
+    desc_col          = idx['지문']
+    public_col        = idx['공개여부']
+    creature_col      = idx['크리쳐']
+    obj_name_col      = idx['오브젝트명']
+    item_col          = idx['획득아이템']
+    once_col          = idx['1회한정']
+    taken_col         = idx['획득자ID']
+    credit_col        = idx['크레딧']
+    credit_taken_col  = idx['크레딧수령자ID']
+    choice_cols       = (1..6).map { |n| idx["선택지#{n}"] }.compact
+
+    target = coord.to_s.strip.upcase
+    result = nil
+    objects = []
+    in_group = false
+
+    rows[1..].to_a.each do |row|
+      row_code = row[pos_col].to_s.strip.upcase
+      row_name = row[name_col].to_s.strip
+      canonical = row_code.empty? ? row_name : row_code
+
+      unless canonical.empty?
+        if canonical.upcase == target
+          in_group = true
+          choices = choice_cols.map { |c| row[c].to_s.strip }.reject(&:empty?)
+          result = {
+            code: canonical,
+            name: row_name,
+            desc: desc_col ? row[desc_col].to_s.strip : '',
+            choices: choices,
+            public: public_col ? TRUTHY.include?(row[public_col].to_s.strip.upcase) : false,
+            creature: creature_col ? row[creature_col].to_s.strip : ''
+          }
+        else
+          in_group = false
+        end
+      end
+
+      next unless in_group
+
+      obj_name = obj_name_col ? row[obj_name_col].to_s.strip : ''
+      item_field = item_col ? row[item_col].to_s.strip : ''
+      effective_name = obj_name.empty? ? item_field.split(',').first.to_s.strip : obj_name
+      next if effective_name.empty?
+
+      once = once_col ? TRUTHY.include?(row[once_col].to_s.strip.upcase) : false
+      taken_by = taken_col ? row[taken_col].to_s.strip : ''
+      credit = credit_col ? row[credit_col].to_s.gsub(/[^\-0-9]/, '').to_i : 0
+      credit_taken_by = credit_taken_col ? row[credit_taken_col].to_s.strip : ''
+
+      once_taken = once && !taken_by.empty?
+      credit_settled = credit != 0 && !credit_taken_by.empty?
+      next if once_taken || credit_settled
+
+      objects << {
+        name: effective_name,
+        named: !obj_name.empty?,
+        item: item_field
+      }
+    end
+
+    return nil unless result
+
+    result[:objects] = objects
+    result
+  rescue => e
+    puts "[ScoutDirections.find_location_full_in 오류] #{e.class}: #{e.message}"
+    nil
+  end
+
+  # 전투 종료 후 안내용. 격자 방향 + 이동 가능한 장소 + 조사/획득 목록을
+  # 위치/조사 커맨드와 동일한 형식으로 합쳐서 보여준다.
+  def build_location_announcement(scout_sheet, grid_sheet, acct)
+    coord = find_location(scout_sheet, acct)
+    return nil if coord.to_s.strip.empty?
+
+    lines = []
+
+    if valid_coord?(coord)
+      directions = available_directions(scout_sheet, grid_sheet, coord)
+      if directions.any?
+        lines << '이동 가능한 방향:'
+        directions.each { |name| lines << "[탐사/#{name}]" }
+      end
+    end
+
+    location = find_location_full(scout_sheet, grid_sheet, coord)
+    if location
+      if location[:choices].any?
+        lines << '' if lines.any?
+        lines << '이동 가능한 장소:'
+        location[:choices].each { |c| lines << "・ #{c}" }
+        lines << '[위치/장소명] 형식으로 이동할 수 있습니다.'
+      end
+
+      investigate_points = location[:objects].select { |o| o[:named] }
+      acquirable_items = location[:objects].reject { |o| o[:named] }
+        .flat_map { |o| o[:item].to_s.split(',').map(&:strip).reject(&:empty?) }
+        .uniq
+
+      if investigate_points.any?
+        lines << '' if lines.any?
+        lines << '조사할 수 있는 것들:'
+        investigate_points.each { |o| lines << "・ #{o[:name]}" }
+        lines << '[조사/오브젝트명] 으로 자세히 살펴볼 수 있습니다.'
+      end
+
+      if acquirable_items.any?
+        lines << '' if lines.any?
+        lines << '획득할 수 있는 것들:'
+        acquirable_items.each { |item| lines << "・ #{item}" }
+        lines << '[획득/아이템명] 으로 바로 가져갈 수 있습니다.'
+      end
+    end
+
+    return nil if lines.empty?
+    lines.join("\n")
+  end
+
+
   # ── 크리쳐 처치 보상 크레딧 지급 ──
   #
   # 조사봇의 "사용자" 시트(ID/이름/크레딧/아이템/기숙사)에 직접 크레딧을 더한다.
@@ -191,6 +327,61 @@ module ScoutDirections
   rescue => e
     puts "[ScoutDirections.add_credits 오류] #{e.class}: #{e.message}"
     nil
+  end
+
+  # 패배 시 크레딧 압수용. min_amount~max_amount 사이 랜덤 금액을 압수하되
+  # 보유 크레딧 이상으로 압수하지 않는다(0 미만으로 내려가지 않음).
+  # 반환값: [압수금액, 압수후잔액] 또는 계정을 못 찾으면 nil
+  def confiscate_credits(scout_sheet, acct, min_amount, max_amount)
+    return nil unless scout_sheet
+    acct = acct.to_s.gsub('@', '').strip
+    rows = scout_sheet.read("'사용자'!A:E")
+    return nil if rows.empty?
+    idx = header_index(rows[0])
+    id_col     = idx['ID'] || 0
+    credit_col = idx['크레딧'] || 2
+    rows[1..].to_a.each_with_index do |row, i|
+      id = row[id_col].to_s.gsub('@', '').strip
+      next unless id == acct
+      current = row[credit_col].to_s.strip.to_i
+      cap = [max_amount.to_i, current].min
+      if cap <= 0
+        taken = 0
+      else
+        low = [min_amount.to_i, cap].min
+        low = 1 if low <= 0
+        taken = rand(low..cap)
+      end
+      new_credits = current - taken
+      scout_sheet.write("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits]])
+      return [taken, new_credits]
+    end
+    nil
+  rescue => e
+    puts "[ScoutDirections.confiscate_credits 오류] #{e.class}: #{e.message}"
+    nil
+  end
+
+  # 전투 패배 시 조사를 종료시킨다. (조사봇 [조사종료]와 동일 — 위치를
+  # 비우고 최근행동을 '조사종료'로 남긴다.)
+  def end_scout!(scout_sheet, acct)
+    return unless scout_sheet
+    acct = acct.to_s.gsub('@', '').strip
+    rows = scout_sheet.read("'조사상태'!A:C")
+    return if rows.empty?
+    idx = header_index(rows[0])
+    id_col       = idx['ID'] || 0
+    location_col = idx['위치'] || 1
+    action_col   = idx['최근행동'] || 2
+    rows[1..].to_a.each_with_index do |row, i|
+      id = row[id_col].to_s.gsub('@', '').strip
+      next unless id == acct
+      scout_sheet.write("'조사상태'!#{column_letter(location_col)}#{i + 2}", [['']])
+      scout_sheet.write("'조사상태'!#{column_letter(action_col)}#{i + 2}", [['조사종료']])
+      return
+    end
+  rescue => e
+    puts "[ScoutDirections.end_scout! 오류] #{e.class}: #{e.message}"
   end
 
   # ── 격자 조우 여부 판별 ──
