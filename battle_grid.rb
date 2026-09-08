@@ -121,18 +121,27 @@ module BattleGrid
     cells.map { |cell| distance(pos, cell) }.compact.min
   end
 
+  def manhattan_distance_to_creature(pos, creature)
+    cells = creature_cells(creature)
+    return nil if cells.empty?
+    cells.map { |cell| manhattan(pos, cell) }.compact.min
+  end
+
   def in_range?(from, target, range, creature: nil)
     range_text = range.to_s.strip
     return true if range_text.empty? || range_text == '-' || range_text == '전체' || range_text == '특정마스'
     return true if range_text == '자신' && from.to_s.strip.upcase == target.to_s.strip.upcase
 
-    limit = range_text == '근접' ? 1 : range_text.to_i
+    is_close_range = range_text == '근접'
+    limit = is_close_range ? 1 : range_text.to_i
     limit = 1 if limit <= 0
 
+    # "근접"은 3x3 정사각형(체비셰프 거리), 숫자 사거리(1/2/3...)는
+    # 상하좌우 이동 거리의 합(맨해튼 거리)의 다이아몬드 형태가 정식 사양이다.
     if creature && ['크리쳐', creature[:name].to_s].include?(target.to_s.strip)
-      d = distance_to_creature(from, creature)
+      d = is_close_range ? distance_to_creature(from, creature) : manhattan_distance_to_creature(from, creature)
     else
-      d = distance(from, target)
+      d = is_close_range ? distance(from, target) : manhattan(from, target)
     end
 
     d && d <= limit
@@ -147,6 +156,11 @@ module BattleGrid
     dy = by <=> ay
     return false unless ax == bx || ay == by || (bx - ax).abs == (by - ay).abs
 
+    dest_cell = format_pos(bx, by)
+    # 목적지 칸도 점유 체크 대상에 포함 (크리쳐/아군이 있는 칸으로는 도착 불가)
+    return false if occupied_by_runners(runner_state, except_name: actor_name).key?(dest_cell)
+    return false if occupied_by_creature(creature).key?(dest_cell)
+
     x = ax + dx
     y = ay + dy
     while x != bx || y != by
@@ -158,6 +172,33 @@ module BattleGrid
     end
 
     true
+  end
+
+  # 습격 전용: 목적지까지 완전히 뚫려있지 않아도, 막히기 직전의
+  # 마지막 빈 칸까지는 돌진해서 그 자리에 멈춘다 ("부딪혀서 멈춘다").
+  # 시작 칸부터 막혀 있으면 제자리(from)를 반환한다.
+  def rush_landing_cell(from, to, runner_state, creature, actor_name: nil)
+    ax, ay = parse_pos(from)
+    bx, by = parse_pos(to)
+    return from.to_s.strip.upcase unless ax && bx
+
+    dx = bx <=> ax
+    dy = by <=> ay
+    return from.to_s.strip.upcase unless ax == bx || ay == by || (bx - ax).abs == (by - ay).abs
+
+    last_clear = from.to_s.strip.upcase
+    x, y = ax, ay
+
+    while x != bx || y != by
+      x += dx
+      y += dy
+      cell = format_pos(x, y)
+      break if occupied_by_runners(runner_state, except_name: actor_name).key?(cell)
+      break if occupied_by_creature(creature).key?(cell)
+      last_clear = cell
+    end
+
+    last_clear
   end
 
   # ──────────────────────────────────────────────

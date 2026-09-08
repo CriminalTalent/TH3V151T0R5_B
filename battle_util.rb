@@ -12,13 +12,15 @@ def new_passive_ctx
     buffs: Hash.new { |h, k| h[k] = [] },
     shields: Hash.new(0),
     confusion: Hash.new(0),
+    prev_boss_skill: nil,
     sure_hit: {},
     revenge: {},
     cover: {},
     survive_once: {},
     indomitable_buffer: Hash.new(0),
     debuffs: Hash.new { |h, k| h[k] = [] },
-    stun: {}
+    stun: {},
+    action_locked: {}
   }
 end
 

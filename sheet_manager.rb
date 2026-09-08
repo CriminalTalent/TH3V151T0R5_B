@@ -58,6 +58,39 @@ class SheetManager
   end
 
   # ──────────────────────────────────────────────
+  # 현상금 사냥 참여 기록 (1인당 1일 1회 제한용)
+  # ──────────────────────────────────────────────
+  BOUNTY_LOG_SHEET = '현상금기록'.freeze
+
+  def bounty_participated_today?(acct, today)
+    acct = acct.to_s.gsub('@', '').strip
+    rows = read("#{BOUNTY_LOG_SHEET}!A:B")
+    return false if rows.empty?
+
+    rows.any? do |row|
+      row[0].to_s.strip == today.to_s && row[1].to_s.gsub('@', '').strip == acct
+    end
+  rescue => e
+    puts "[현상금기록 조회 실패] #{e.class}: #{e.message}"
+    false
+  end
+
+  def mark_bounty_participated!(acct, today)
+    acct = acct.to_s.gsub('@', '').strip
+    body = Google::Apis::SheetsV4::ValueRange.new(values: [[today.to_s, acct]])
+    with_retry("추가 #{BOUNTY_LOG_SHEET}") do
+      @service.append_spreadsheet_value(
+        @sheet_id, "#{BOUNTY_LOG_SHEET}!A:B", body,
+        value_input_option: 'RAW'
+      )
+    end
+    true
+  rescue => e
+    puts "[현상금기록 기록 실패] #{e.class}: #{e.message}"
+    false
+  end
+
+  # ──────────────────────────────────────────────
   # 기본 I/O
   # ──────────────────────────────────────────────
 
@@ -242,6 +275,10 @@ class SheetManager
     @base_stats_cache_at = nil
   end
 
+  # 크리쳐 스탯 탭 실제 컬럼 순서 (2026-08-13 확정, main.rb의 read_base_stats가
+  # 읽는 러너용 '스탯' 탭과는 다른 스프레드시트/다른 배치이므로 절대 혼동 금지):
+  # A=활성 B=이름 C=위치 D=크기 E=현재스킬 F=건강 G=내구도 H=마법능력 I=민첩 J=기술 K=행운 L=비고 M=보상크레딧
+  # (별도 '최대건강' 컬럼 없음 — 크리쳐는 F열 건강 값을 그대로 최대건강으로도 사용)
   def read_creature_stats(creature_name)
     creature_name = creature_name.to_s.strip
     return nil if creature_name.empty?
@@ -249,7 +286,7 @@ class SheetManager
     rows = read("'스탯'!A2:M100")
 
     row = rows.find do |r|
-      r[0].to_s.strip == creature_name || r[1].to_s.strip == creature_name
+      r[1].to_s.strip == creature_name
     end
 
     unless row
@@ -257,24 +294,25 @@ class SheetManager
       return default_creature_stats(creature_name)
     end
 
-    hp = row[4].to_i
-    hp = row[1].to_i if hp <= 0 && numeric?(row[1])
+    hp_raw = row[5].to_s.strip
+    hp = hp_raw.match?(/\A-?\d+\z/) ? hp_raw.to_i : 200
     hp = 200 if hp <= 0
 
-    max_hp = row[10].to_i
-    max_hp = hp if max_hp <= 0
+    pos_raw = row[2].to_s.strip.upcase
+    pos = pos_raw.match?(/\A[A-G][1-8]\z/) ? pos_raw : (extract_position(row) || 'D4')
 
     {
-      name:    creature_name,
-      hp:      hp,
-      max_hp:  max_hp,
-      dur:     stat_value(row, 5, 3, 10),
-      atk:     stat_value(row, 6, 2, 10),
-      agi:     stat_value(row, 7, 4, 0),
-      tec:     stat_value(row, 8, 5, 0),
-      luck:    stat_value(row, 9, 6, 0),
-      pos:     extract_position(row) || 'D4',
-      status:  ''
+      name:          creature_name,
+      hp:            hp,
+      max_hp:        hp,
+      dur:           row[6].to_i,
+      atk:           row[7].to_i,
+      agi:           row[8].to_i,
+      tec:           row[9].to_i,
+      luck:          row[10].to_i,
+      current_skill: row[4].to_s.strip,
+      pos:           pos,
+      status:        ''
     }
   rescue => e
     puts "[read_creature_stats 오류] #{e.message}"
@@ -283,16 +321,17 @@ class SheetManager
 
   def default_creature_stats(name)
     {
-      name:    name,
-      hp:      200,
-      max_hp:  200,
-      dur:     10,
-      atk:     10,
-      agi:     0,
-      tec:     0,
-      luck:    0,
-      pos:     'D4',
-      status:  ''
+      name:          name,
+      hp:            200,
+      max_hp:        200,
+      dur:           10,
+      atk:           10,
+      agi:           0,
+      tec:           0,
+      luck:          0,
+      current_skill: '',
+      pos:           'D4',
+      status:        ''
     }
   end
 

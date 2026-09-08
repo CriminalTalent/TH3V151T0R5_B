@@ -242,10 +242,18 @@ def current_creature(creature_sheet)
   apply_boss_skill_definition!(attach_creature_size_from_sheet(stats, creature_sheet), creature_sheet)
 end
 
+# [현상금/크리쳐이름/판돈] 형식 파싱. 매치 안 되면 nil.
+def bounty_start_match(content)
+  content.to_s.match(/\[현상금\/([^\/\]]+?)\/(\d+)\]/i)
+end
+
 def creature_from_start_content(content, creature_sheet)
+  # [현상금/크리쳐명/판돈] 형식도 크리쳐명 파싱 대상에 포함시킨다.
+  bounty_match = bounty_start_match(content)
+
   # [전투시작/크리쳐명] 또는 [전투시작/크리쳐명/위치] 형식 우선 파싱
   slash_match = content.to_s.match(/\[전투시작\/([^\/\]]+?)(?:\/([A-G][1-8]))?\]/i)
-  name       = slash_match&.[](1)
+  name       = bounty_match ? bounty_match[1] : slash_match&.[](1)
   inline_pos = slash_match&.[](2)
 
   name = content.to_s.match(/크리쳐\s*[「『](.+?)[」』]\s*출현/)&.[](1) if name.to_s.strip.empty?
@@ -285,6 +293,14 @@ def creature_from_start_content(content, creature_sheet)
   stats[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
   stats[:size] = size unless size.empty?
   stats[:cells] = cells unless cells.empty?
+
+  # 현상금 사냥: hp/max_hp/atk를 2배로 강화한다.
+  if bounty_match
+    stats[:hp] = stats[:hp].to_i * 2
+    stats[:max_hp] = stats[:max_hp].to_i * 2
+    stats[:atk] = stats[:atk].to_i * 2
+  end
+
   apply_boss_skill_definition!(attach_creature_size_from_sheet(stats, creature_sheet), creature_sheet)
 rescue => e
   puts "[전투봇] 전투시작문 크리쳐 파싱 실패: #{e.class}: #{e.message}"
@@ -362,7 +378,7 @@ def targetless_attack_skill?(action_type)
   ['폭발', '전체공격'].include?(action_type.to_s)
 end
 
-def validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, creature, positions: nil)
+def validate_action(username, action_type, action_target, runner_names, view_sheet, runner_sheet, creature, positions: nil, battle_actions: nil)
   runner_state = merge_runner_state(
     view_sheet,
     runner_sheet,
@@ -430,6 +446,17 @@ def validate_action(username, action_type, action_target, runner_names, view_she
     unless BattleGrid.in_range?(actor[:pos], target, skill[:range], creature: creature)
       return [false, "#{action_type}의 사거리 밖입니다. 현재 위치: #{actor[:pos]}, 대상: #{target}"]
     end
+    # 습격은 최종적으로 머무는 좌표(parts[1])가 크리쳐 바로 옆(1칸 이내)이어야 합니다.
+    if skill[:kind] == :rush
+      rush_dest = parts[1].to_s.strip.upcase
+      unless BattleGrid.valid_pos?(rush_dest)
+        return [false, '이동할 좌표가 올바르지 않습니다. 예: [습격/크리쳐이름/D4]']
+      end
+      rush_dist = BattleGrid.distance_to_creature(rush_dest, creature)
+      if rush_dist.nil? || rush_dist > 1
+        return [false, "습격은 #{creature_name} 바로 옆(1칸 이내)에 머무는 좌표만 지정할 수 있습니다. 지정 좌표: #{rush_dest}"]
+      end
+    end
   elsif BattleSkills.support?(action_type) || BattleSkills.defense?(action_type)
     # 범위형(사거리 내 전원 적용) 스킬은 인물 지정이 필요 없습니다.
     area_skill = [:heal_area, :atk_buff_area, :dur_buff_area, :agi_buff_area].include?(skill[:kind])
@@ -447,6 +474,24 @@ def validate_action(username, action_type, action_target, runner_names, view_she
       return [false, '이동 좌표가 올바르지 않습니다.'] unless BattleGrid.valid_pos?(parts[1])
     elsif !target_runner && !['-', '특정마스'].include?(skill[:range].to_s)
       return [false, '대상을 찾을 수 없습니다. 참여자 아이디를 확인해주세요.']
+    end
+
+    # 대상이 이번 라운드에 이미 습격을 접수해뒀다면, 사거리 판정을 습격의
+    # 예상 도착 위치 기준으로 한다(습격이 지원 스킬보다 먼저 접수된 경우에만
+    # 반영되며, 나중에 접수되면 이 시점엔 알 수 없어 기존 위치로 판정한다).
+    if target_runner && battle_actions.is_a?(Hash)
+      rush_act = battle_actions[target_runner[:name].to_s] || battle_actions[target_runner[:name].to_s.to_sym]
+      if rush_act
+        rush_skill = BattleSkills.get(rush_act[:type])
+        if rush_skill && rush_skill[:kind] == :rush
+          rush_parts = skill_target_parts(rush_act[:target])
+          rush_dest = rush_parts[1].to_s.strip.upcase
+          if BattleGrid.valid_pos?(rush_dest)
+            landing = BattleGrid.rush_landing_cell(target_runner[:pos], rush_dest, runner_state, creature, actor_name: target_runner[:name])
+            target_runner = target_runner.merge(pos: landing)
+          end
+        end
+      end
     end
 
     if target_runner && !BattleGrid.in_range?(actor[:pos], target_runner[:pos], skill[:range])
@@ -467,6 +512,18 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   if processed_messages[username]
     puts "[전투봇] 중복 행동 무시: @#{username} -> #{text}"
     processed_id_set.add(processed_id)
+    return
+  end
+
+  # 필사즉생 과잉피해로 인한 다음 라운드 행동 봉쇄. 잠금이 걸려 있으면
+  # 어떤 명령을 보냈든 무조건 무효 처리하고 잠금을 소비(해제)한다.
+  if ctx && ctx[:action_locked] && ctx[:action_locked][username]
+    ctx[:action_locked].delete(username)
+    battle_actions[username] = { type: '행동불가', target: '' }
+    processed_messages[username] = true
+    processed_id_set.add(processed_id)
+    listener.send_dm(username, "[필사즉생] 과잉 피해로 인해 이번 라운드는 행동할 수 없습니다.") if listener
+    puts "[전투봇] 행동 봉쇄: @#{username} → 필사즉생 과잉피해로 행동 불가"
     return
   end
 
@@ -516,6 +573,26 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
         processed_id_set.add(processed_id)
         return
       end
+
+      # 즉발은 "정산 시점"이 아니라 "접수(입력) 시점"에 즉시 효과를 낸다.
+      # 같은 라운드 안에서 대상이 곧바로 그 스킬을 다시 쓸 수 있어야 하는데,
+      # 다른 스킬(쿨타임 체크)은 접수 시점에 이루어지므로 즉발도 접수 시점에
+      # 쿨타임을 지워야 같은 라운드 내 재사용이 가능해진다.
+      if skill[:kind] == :cooldown_reset
+        reset_parts = action_target.to_s.split('/').map(&:strip).reject(&:empty?)
+        reset_target_raw = reset_parts[0].to_s
+        skill_to_reset = reset_parts[1].to_s
+
+        if skill_to_reset.empty?
+          puts "[전투봇] 즉발 즉시효과 무효 (스킬명 미입력): @#{username} -> #{action_target}"
+        else
+          reset_targets = reset_target_raw.split(',').map { |t| normalize_target(t) }.reject(&:empty?)
+          reset_targets.each do |rt|
+            ctx[:cooldowns][rt].delete(skill_to_reset)
+          end
+          puts "[전투봇] 즉발 즉시효과 적용: @#{username} -> #{reset_targets.join(', ')}의 [#{skill_to_reset}] 쿨타임 초기화"
+        end
+      end
     end
   end
 
@@ -527,7 +604,8 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     view_sheet,
     runner_sheet,
     battle_creature,
-    positions: ctx.is_a?(Hash) ? ctx[:positions] : nil
+    positions: ctx.is_a?(Hash) ? ctx[:positions] : nil,
+    battle_actions: battle_actions
   )
 
   unless valid

@@ -9,8 +9,8 @@
 
 module ScoutDirections
   COLS = ('C'..'O').to_a.freeze
-  ROWS = (2..8).to_a.freeze
-  COORD_RE = /\A([C-O])([2-8])\z/.freeze
+  ROWS = ((2..8).to_a + (10..16).to_a).freeze
+  COORD_RE = /\A([C-O])([2-8]|1[0-6])\z/.freeze
 
   DIRECTIONS = {
     '북쪽' => [0, -1],
@@ -20,11 +20,18 @@ module ScoutDirections
   }.freeze
 
   TRUTHY = %w[TRUE 1 ON YES Y ✓ ✔].freeze
+  EXTRA_LOCATION_SHEET = '추가'.freeze
 
   module_function
 
   def valid_coord?(coord)
     !!coord.to_s.strip.upcase.match(COORD_RE)
+  end
+
+  # 행 9는 존재하지 않으며, 2~8 구역과 10~15 구역은 서로 다른 미로로
+  # 완전히 분리된다 (조사봇 grid_move_command.rb와 동일한 규칙).
+  def zone_of(row)
+    row.to_i <= 8 ? :zone1 : :zone2
   end
 
   def neighbor_coord(coord, delta)
@@ -39,6 +46,7 @@ module ScoutDirections
     nr = row_idx + delta[1]
     return nil unless nc.between?(0, COLS.length - 1)
     return nil unless nr.between?(0, ROWS.length - 1)
+    return nil if zone_of(m[2].to_i) != zone_of(ROWS[nr])
 
     "#{COLS[nc]}#{ROWS[nr]}"
   end
@@ -75,10 +83,10 @@ module ScoutDirections
   end
 
   # "장소" 시트에서 좌표의 공개여부/막힌방향을 읽는다.
-  def find_cell(sheet, coord)
+  def find_cell(sheet, coord, sheet_name = '장소')
     return nil unless sheet
 
-    rows = sheet.read("'장소'!A:S")
+    rows = sheet.read("'#{sheet_name}'!A:T")
     return nil if rows.empty?
 
     idx = header_index(rows[0])
@@ -108,7 +116,9 @@ module ScoutDirections
   # 조사봇의 메인 시트(scout_sheet) → 조사맵 시트(grid_sheet) 순으로 찾는다
   # (조사봇 sheet_manager.rb의 find_location 우선순위와 동일).
   def find_cell_any(scout_sheet, grid_sheet, coord)
-    find_cell(scout_sheet, coord) || find_cell(grid_sheet, coord)
+    find_cell(scout_sheet, coord) ||
+      find_cell(grid_sheet, coord) ||
+      find_cell(grid_sheet, coord, EXTRA_LOCATION_SHEET)
   end
 
   def blocked_list(cell)
@@ -150,13 +160,15 @@ module ScoutDirections
   # 조사봇 sheet_manager.rb의 find_location_in과 동일한 그룹핑 규칙을 사용한다
   # (읽기 전용 조회이며, 조사봇 코드/시트 구조는 건드리지 않는다).
   def find_location_full(scout_sheet, grid_sheet, coord)
-    find_location_full_in(scout_sheet, coord) || find_location_full_in(grid_sheet, coord)
+    find_location_full_in(scout_sheet, coord) ||
+      find_location_full_in(grid_sheet, coord) ||
+      find_location_full_in(grid_sheet, coord, EXTRA_LOCATION_SHEET)
   end
 
-  def find_location_full_in(sheet, coord)
+  def find_location_full_in(sheet, coord, sheet_name = '장소')
     return nil unless sheet
 
-    rows = sheet.read("'장소'!A:S")
+    rows = sheet.read("'#{sheet_name}'!A:T")
     return nil if rows.empty?
 
     idx = header_index(rows[0])
@@ -300,6 +312,24 @@ module ScoutDirections
     result
   end
 
+  def get_credit(scout_sheet, acct)
+    return nil unless scout_sheet
+    acct = acct.to_s.gsub('@', '').strip
+    rows = scout_sheet.read("'사용자'!A:E")
+    return nil if rows.empty?
+
+    idx = header_index(rows[0])
+    id_col     = idx['ID'] || 0
+    credit_col = idx['크레딧'] || 2
+
+    rows[1..].to_a.each do |row|
+      id = row[id_col].to_s.gsub('@', '').strip
+      next unless id == acct
+      return row[credit_col].to_s.strip.to_i
+    end
+    nil
+  end
+
   def add_credits(scout_sheet, acct, amount)
     return nil unless scout_sheet
     return nil if amount.to_i == 0
@@ -382,6 +412,52 @@ module ScoutDirections
     end
   rescue => e
     puts "[ScoutDirections.end_scout! 오류] #{e.class}: #{e.message}"
+  end
+
+  # ── 전투 패배(전투불능) 플래그 기록 ──
+  #
+  # 전투 패배로 크레딧이 압수된 러너의 조사상태 '최근행동'을 '전투불능'으로
+  # 남긴다. 위치는 건드리지 않는다. 조사봇(F)의 investigate_command.rb 등이
+  # 이 값을 보고 조사/이동 가능 여부를 판단한다. 상점봇에서 회복 아이템을
+  # 사용해 체력이 0 초과로 회복되면 이 플래그를 해제한다(use_item_command.rb).
+  def mark_incapacitated!(scout_sheet, acct)
+    return unless scout_sheet
+    acct = acct.to_s.gsub('@', '').strip
+    rows = scout_sheet.read("'조사상태'!A:C")
+    return if rows.empty?
+    idx = header_index(rows[0])
+    id_col     = idx['ID'] || 0
+    action_col = idx['최근행동'] || 2
+    rows[1..].to_a.each_with_index do |row, i|
+      id = row[id_col].to_s.gsub('@', '').strip
+      next unless id == acct
+      scout_sheet.write("'조사상태'!#{column_letter(action_col)}#{i + 2}", [['전투불능']])
+      return
+    end
+  rescue => e
+    puts "[ScoutDirections.mark_incapacitated! 오류] #{e.class}: #{e.message}"
+  end
+
+  # 패배 시 조사상태 위치를 비워 초기화한다 ("복귀"). 최근행동(전투불능
+  # 플래그)은 건드리지 않는다 — mark_incapacitated!와 별도로 호출해서 함께 쓴다.
+  # 위치가 비면 [탐사]/[조사]는 자연히 "위치 정보가 없습니다" 안내로 막히고,
+  # [위치/장소명]으로만 새로 진행할 수 있다. 1구역/2구역 좌표 구분 없이 동일 적용.
+  def clear_location!(scout_sheet, acct)
+    return unless scout_sheet
+    acct = acct.to_s.gsub('@', '').strip
+    rows = scout_sheet.read("'조사상태'!A:C")
+    return if rows.empty?
+    idx = header_index(rows[0])
+    id_col       = idx['ID'] || 0
+    location_col = idx['위치'] || 1
+    rows[1..].to_a.each_with_index do |row, i|
+      id = row[id_col].to_s.gsub('@', '').strip
+      next unless id == acct
+      scout_sheet.write("'조사상태'!#{column_letter(location_col)}#{i + 2}", [['']])
+      return
+    end
+  rescue => e
+    puts "[ScoutDirections.clear_location! 오류] #{e.class}: #{e.message}"
   end
 
   # ── 격자 조우 여부 판별 ──

@@ -4,7 +4,8 @@ class BattleSession
   attr_accessor :id, :auto_mode, :mode, :round, :active, :announced, :actions,
                 :start_time, :auto_next_round_timer, :creature, :runner_names,
                 :runner_tags, :processed_messages, :passive_ctx, :thread_reply_id,
-                :thread_ids, :dead_runners, :phase, :awaiting_boss
+                :thread_ids, :dead_runners, :phase, :awaiting_boss, :dm_visibility,
+                :bounty_pot, :bounty_per_person
 
   def initialize(id:, mode:, runner_names:, creature:, thread_reply_id: nil, round: 1)
     @id = id.to_s
@@ -27,6 +28,13 @@ class BattleSession
     @dead_runners = []
     @phase = :prep
     @awaiting_boss = false
+    # 실행 탭 B2(퍼블릭/DM) 값은 세션 시작 시 한 번만 읽어 고정합니다.
+    # 매 안내 게시마다 다시 읽으면 시트 API 호출이 늘어나고, 구글 쪽
+    # 일시 오류 시 재시도 대기가 라운드마다 누적되어 지연의 원인이 됩니다.
+    @dm_visibility = nil
+    # 현상금 사냥 판돈(총액)과 1인당 부담액. 일반 전투는 nil로 유지된다.
+    @bounty_pot = nil
+    @bounty_per_person = nil
   end
 
   # 전투불가(체력 0) 러너를 제외한, 이번 라운드 행동이 필요한 인원 수

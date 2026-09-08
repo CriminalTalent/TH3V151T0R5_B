@@ -28,13 +28,13 @@ def prepare_rush_moves!(battle_actions, runner_state, creature, ctx, state_of)
     old_pos = actor[:pos]
     dist = BattleGrid.distance(old_pos, dest).to_i
     multiplier = dist >= 5 ? skill[:long_multiplier] : skill[:multiplier]
-    if BattleGrid.line_clear?(old_pos, dest, runner_state, creature, actor_name: name)
-      actor[:pos] = dest
-      (ctx[:positions] ||= {})[name.to_s] = dest
-      moves[name] = { old_pos: old_pos, dest: dest, multiplier: multiplier, moved: true }
-    else
-      moves[name] = { old_pos: old_pos, dest: dest, multiplier: multiplier, moved: false }
+    landing = BattleGrid.rush_landing_cell(old_pos, dest, runner_state, creature, actor_name: name)
+    moved = landing != old_pos
+    if moved
+      actor[:pos] = landing
+      (ctx[:positions] ||= {})[name.to_s] = landing
     end
+    moves[name] = { old_pos: old_pos, dest: landing, multiplier: multiplier, moved: moved }
   end
   moves
 end
@@ -85,8 +85,24 @@ def cooldown_gate!(ctx, log, name, skill_name, skill, dname = nil)
     return false
   end
 
-  ctx[:cooldowns][name][skill_name] = cd
+  ctx[:cooldowns][name][skill_name] = cd + 1
   true
+end
+
+# 크리쳐가 여러 칸을 차지할 때(예: 3x1), 공격 스킬의 사거리 안에 걸리는
+# 칸 수만큼 배율을 곱한다. 사거리가 '-'/'전체'/'특정마스'/빈값이면 크리쳐가
+# 차지한 칸 전부를 맞춘 것으로 간주. 습격은 자체 거리 배율(×1.5/×2.5) 체계가
+# 이미 있어 이 계산 대상에서 제외한다(호출부에서 rush_attack이면 건너뜀).
+def cells_hit_count(from_pos, range_text, creature)
+  cells = BattleGrid.creature_cells(creature)
+  return 1 if cells.empty?
+  return [cells.size, 1].max if ['', '-', '전체', '특정마스'].include?(range_text.to_s.strip)
+
+  limit = range_text.to_s.strip == '근접' ? 1 : range_text.to_s.strip.to_i
+  limit = 1 if limit <= 0
+
+  hit = cells.count { |cell| BattleGrid.distance(from_pos, cell).to_i <= limit }
+  [hit, 1].max
 end
 
 def apply_damage_to_creature(log, creature, attacker_name, skill_name, atk_value, multiplier, dur, crit: false, guaranteed: false)
@@ -202,6 +218,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   luck_bonus = Hash.new(0)
   agi_bonus  = Hash.new(0)
   defended_multiplier = Hash.new(1.0)
+
+  # [시야차단]은 부여된 라운드 + 다음 라운드까지 적용(N+1)
+  creature_atk_before_blind = nil
   shields = ctx[:shields]
 
   runner_names.each do |name|
@@ -220,10 +239,10 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
     case s[:house].to_s.strip
     when '그리핀도르'
-      if s[:passive] == '2' && st[:max_hp].to_i > 0 && st[:hp].to_f < st[:max_hp].to_i * 0.5
+      if s[:passive] == '2' && st[:max_hp].to_i > 0 && st[:hp].to_f < st[:max_hp].to_i * 0.4
         b = (s[:atk].to_i * 0.5).ceil
         atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [그리핀도르] 건강 50% 미만 — 마법능력 +#{b}"
+        passive_lines << "#{display_name_of.call(name)}: [그리핀도르] 건강 40% 미만 — 마법능력 +#{b}"
       end
     when '슬리데린'
       if s[:passive] == '1' && ctx[:round].to_i > 1 && !ctx[:prev_took_damage][name]
@@ -236,7 +255,8 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
         passive_lines << "#{display_name_of.call(name)}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][name]}"
       end
     when '래번클로'
-      if s[:passive] == '1' && !creature[:status].to_s.strip.empty?
+      creature_has_ailment = ctx[:confusion][creature[:name]].to_i > 0 || !ctx[:blind_active].nil?
+      if s[:passive] == '1' && creature_has_ailment
         b = (s[:atk].to_i * 0.5).ceil
         atk_bonus[name] += b
         passive_lines << "#{display_name_of.call(name)}: [래번클로] 적 상태이상 감지 — 마법능력 +#{b}"
@@ -431,8 +451,17 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       agi_bonus[name] += skill[:value].to_i
       log << "#{dname}의 회피 → 민첩 +#{skill[:value]}"
     when :revenge
-      ctx[:revenge][target_name] = { by: name, multiplier: skill[:multiplier] }
-      log << "#{dname}의 복수 → #{display_name_of.call(target_name)} 피격 시 반격 대기"
+      applied = []
+      revenge_targets = split_targets(parts[0])
+      revenge_targets = [target_name] if revenge_targets.empty?
+      limit = skill[:max_targets] || revenge_targets.size
+      revenge_targets.first(limit).each do |tname|
+        t = state_of.call(tname)
+        next unless t
+        ctx[:revenge][tname] = { by: name, multiplier: skill[:multiplier] }
+        applied << display_name_of.call(tname)
+      end
+      log << "#{dname}의 복수 → #{applied.join(', ')} 피격 시 반격 대기" if applied.any?
     when :cover
       ctx[:cover][target_name] = name if target
       log << "#{dname}의 희생 → #{display_name_of.call(target_name)} 대신 피격 대기" if target
@@ -497,6 +526,15 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       if info
         multiplier = info[:multiplier]
         log << "#{display_name_of.call(name)}의 습격 이동 #{info[:old_pos]} → #{info[:dest]}" if info[:moved]
+      end
+    elsif skill[:kind] == :area_attack
+      # 폭발 전용 기믹: 크리쳐가 여러 칸을 차지하는 경우, 폭발 범위 안에
+      # 걸리는 칸 수만큼 배율을 곱한다. 다른 공격 스킬(공격/초인적인힘/
+      # 혼란/고육지책 등)은 이 규칙 대상이 아니다 — 배율 1배 그대로 유지.
+      hits = cells_hit_count(actor[:pos], skill[:range], creature)
+      if hits > 1
+        multiplier = (multiplier.to_f * hits)
+        log << "#{display_name_of.call(name)}의 #{skill_name} → 크리쳐 점유칸 #{hits}칸 명중, 배율 ×#{hits}"
       end
     end
 
@@ -574,10 +612,16 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
     case skill[:kind]
     when :attack_debuff
-      down = (creature[:atk].to_i * 0.2).ceil
-      before_atk = creature[:atk].to_i
-      creature[:atk] = [before_atk - down, 0].max
-      log << "#{creature[:name]} 마법능력 #{before_atk} → #{creature[:atk]}"
+      # [시야차단]은 부여 라운드+다음 라운드까지 유지, 이미 걸려있으면 중첩/갱신하지 않는다.
+      if ctx[:blind_active].nil?
+        creature_atk_before_blind = creature[:atk].to_i
+        down = (creature_atk_before_blind * 0.2).ceil
+        creature[:atk] = [creature_atk_before_blind - down, 0].max
+        ctx[:blind_active] = { original_atk: creature_atk_before_blind, expires_round: ctx[:round].to_i + 1 }
+        log << "#{creature[:name]} [시야차단] 마법능력 #{creature_atk_before_blind} → #{creature[:atk]} (이번 라운드+다음 라운드)"
+      else
+        log << "#{creature[:name]} [시야차단] 이미 적용 중 — 추가 감소 없음"
+      end
     when :confusion
       ctx[:confusion][creature[:name]] += 1
       log << "#{creature[:name]} 혼란 #{ctx[:confusion][creature[:name]]}/5중첩"
@@ -585,8 +629,17 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   end
 
   # 4) 보스 패턴/디버프
+  # 혼란 5중첩이면 보스 패턴/기본 반격 둘 다 이번 라운드는 스킵한다.
+  # (기존에는 기본 반격 분기에서만 체크되어, 보스가 패턴 스킬을 쓰는
+  # 라운드에는 5중첩이 차도 무시되고 있었다.)
+  confused_out = ctx[:confusion][creature[:name]] >= 5
+  if confused_out
+    log << "#{creature[:name]}은(는) 혼란 5중첩으로 행동할 수 없습니다."
+    ctx[:confusion][creature[:name]] = 0
+  end
+
   boss_skill_used = false
-  if creature[:hp].to_i > 0
+  if creature[:hp].to_i > 0 && !confused_out
     boss_skill_used = BattleBossPatterns.apply_pattern!(
       log,
       runner_state,
@@ -596,17 +649,14 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       dur_bonus: dur_bonus,
       defended_multiplier: defended_multiplier,
       shields: shields,
-      took_damage: took_damage
+      took_damage: took_damage,
+      agi_bonus: agi_bonus
     )
   end
 
   # 5) 크리쳐 반격
   # 현재스킬/이번턴스킬이 지정된 턴에는 그 스킬이 보스 행동이므로 기본 반격은 생략합니다.
-  if creature[:hp].to_i > 0 && !boss_skill_used
-    if ctx[:confusion][creature[:name]] >= 5
-      log << "#{creature[:name]}은(는) 혼란 5중첩으로 행동할 수 없습니다."
-      ctx[:confusion][creature[:name]] = 0
-    else
+  if creature[:hp].to_i > 0 && !boss_skill_used && !confused_out
       living = runner_state.select { |r| r[:hp].to_i > 0 && runner_names.include?(r[:name]) }
       if living.any?
         target = living.sample
@@ -673,12 +723,12 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
           end
         end
       end
-    end
   end
 
   runner_names.each do |name|
     s = stats_of.call(name)
-    if s[:house].to_s.strip == '슬리데린' && s[:passive] == '2' && battle_actions[name].nil?
+    if s[:house].to_s.strip == '슬리데린' && s[:passive] == '2' &&
+       (battle_actions[name].nil? || battle_actions[name][:type] == '관찰')
       st = state_of.call(name)
       if st && st[:hp].to_i > 0
         ctx[:slytherin_luck][name] += 10
@@ -702,7 +752,16 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     end
     if guardian[:hp].to_i - dmg <= 0 && dmg > 0
       dmg = guardian[:hp].to_i - 1
-      log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지)"
+      if gs[:house].to_s.strip == '후플푸프' && gs[:passive].to_s == '2' && !ctx[:guard_used][name]
+        # 후플푸프 패시브2 보유자는 이 상황을 패시브 사용(전투 중 1회)으로 간주해
+        # 다음 라운드 행동불가 페널티를 받지 않는다.
+        ctx[:guard_used][name] = true
+        log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지 — [후플푸프] 패시브로 페널티 면제)"
+      else
+        ctx[:action_locked] ||= {}
+        ctx[:action_locked][name] = true
+        log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지, 다음 라운드 행동 불가)"
+      end
     else
       log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg}"
     end
@@ -721,6 +780,12 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       guardian[:status] = '전투불가'
       log << "#{display_name_of.call(name)} 전투불가"
     end
+  end
+
+  # [시야차단] 종료: 부여 라운드+다음 라운드가 지나야 원래 마법능력으로 복귀
+  if ctx[:blind_active] && ctx[:round].to_i >= ctx[:blind_active][:expires_round].to_i
+    creature[:atk] = ctx[:blind_active][:original_atk]
+    ctx[:blind_active] = nil
   end
 
   ctx[:prev_took_damage] = took_damage

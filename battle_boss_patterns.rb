@@ -208,6 +208,12 @@ module BattleBossPatterns
       log << "#{dname} 보호막 #{blocked} 흡수"
     end
 
+    if stats[:house].to_s.strip == '후플푸프' && stats[:passive].to_s == '2' &&
+       ctx[:guard_used] && !ctx[:guard_used][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
+      dmg = runner[:hp].to_i - 1
+      ctx[:guard_used][name] = true
+      log << "#{dname}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
+    end
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
     took_damage[name] = true if took_damage && dmg > 0
 

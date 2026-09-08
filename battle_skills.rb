@@ -7,7 +7,7 @@ module BattleSkills
     '활력' => { category: '지원', range: '2', cooldown: 1, kind: :heal, ratio: 1.0, max_targets: 1 },
     '구원' => { category: '지원', range: '2', cooldown: 2, kind: :heal_area, ratio: 0.5 },
     '강화' => { category: '지원', range: '3', cooldown: 2, kind: :atk_buff_area, ratio: 0.5 },
-    '보호' => { category: '지원', range: '근접', cooldown: 2, kind: :shield, value: 30, max_targets: 3 },
+    '보호' => { category: '지원', range: '2', cooldown: 2, kind: :shield, value: 30, max_targets: 3 },
     '백발백중' => { category: '지원', range: '3', cooldown: 2, kind: :sure_hit },
     '응원' => { category: '지원', range: '3', once: true, kind: :luck_buff, value: 30, turns: 2 },
     '즉발' => { category: '지원', range: '3', cooldown: 3, kind: :cooldown_reset },
@@ -25,21 +25,19 @@ module BattleSkills
     '범위공격' => { category: '공격', range: '특정마스', cooldown: 0, kind: :area_attack, multiplier: 1.5, avoidable_by_move: true },
     '전체공격' => { category: '공격', range: '-', cooldown: 0, kind: :area_attack, multiplier: 1.0 },
 
-    '방어' => { category: '방어', range: '근접', cooldown: 1, kind: :dur_guard, ratio: 1.5 },
+    '방어' => { category: '방어', range: '2', cooldown: 1, kind: :dur_guard, ratio: 1.5 },
     '회피' => { category: '방어', range: '자신', cooldown: 2, kind: :agi_buff_self, value: 40 },
-    '복수' => { category: '방어', range: '근접', cooldown: 3, kind: :revenge, multiplier: 2.0 },
-    '희생' => { category: '방어', range: '1', cooldown: 1, kind: :cover },
-    '철벽' => { category: '방어', range: '근접', cooldown: 3, kind: :dur_buff_area, ratio: 0.5 },
-    '주의분산' => { category: '방어', range: '근접', cooldown: 2, kind: :agi_buff_area, value: 30 },
+    '복수' => { category: '방어', range: '2', cooldown: 3, kind: :revenge, multiplier: 2.5, max_targets: 3 },
+    '희생' => { category: '방어', range: '근접', cooldown: 1, kind: :cover },
+    '철벽' => { category: '방어', range: '2', cooldown: 3, kind: :dur_buff_area, ratio: 0.5 },
+    '주의분산' => { category: '방어', range: '3', cooldown: 2, kind: :agi_buff_area, value: 50 },
     '필사즉생' => { category: '방어', range: '-', once: true, kind: :survive_once },
 
-    '도망가기' => { category: '이탈', range: '-', cooldown: 0, kind: :escape, success_rate: 0.5 },
-    '말걸기' => { category: '이탈', range: '-', cooldown: 0, kind: :escape, success_rate: 0.5 },
 
-    '물약사용' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 },
-    '위겐웰드 물약' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 10 },
-    '디터니 원액' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 30 },
-    '수상한 영약' => { category: '지원', range: '근접', cooldown: 0, kind: :heal_fixed, value: 50 }
+    '물약사용' => { category: '지원', range: '3', cooldown: 0, kind: :heal_fixed, value: 10 },
+    '위겐웰드 물약' => { category: '지원', range: '3', cooldown: 0, kind: :heal_fixed, value: 10 },
+    '디터니 원액' => { category: '지원', range: '3', cooldown: 0, kind: :heal_fixed, value: 30 },
+    '수상한 영약' => { category: '지원', range: '3', cooldown: 0, kind: :heal_fixed, value: 50 }
   }.freeze
 
   module_function

@@ -95,11 +95,65 @@ def create_battle_session_from_status(status, content, mode, creature_sheet, bot
   session.thread_ids ||= Set.new
   session.thread_ids.add(status['id'].to_s)
   session.auto_mode = false
+  session.dm_visibility = ($trigger_sheet.read_visibility != 'public')
+
+  bounty_match = bounty_start_match(content)
+  if bounty_match
+    session.bounty_pot = nil
+    session.bounty_per_person = nil
+    session.instance_variable_set(:@bounty_pending_pot, bounty_match[2].to_i)
+    # 현상금 사냥은 실행 탭 설정과 무관하게 항상 DM으로 진행한다.
+    session.dm_visibility = true
+  end
+
   session
 end
 
+# 현상금 사냥 판돈을 검증하고 차감한다. 부족한 사람이 있으면 nil을 반환하고
+# 아무도 차감하지 않는다(전원 확인 후 일괄 처리, 부분 차감 방지).
+def apply_bounty_pot!(session, scout_sheet, creature_sheet)
+  pot = session.instance_variable_get(:@bounty_pending_pot)
+  return true unless pot
+  return true unless pot.to_i > 0
+
+  runners = session.runner_names
+  today = Time.now.strftime('%Y-%m-%d')
+
+  already = runners.select { |acct| creature_sheet.bounty_participated_today?(acct, today) }
+  unless already.empty?
+    session.instance_variable_set(:@bounty_pending_pot, nil)
+    return [:already_participated, already, nil]
+  end
+
+  per_person = (pot.to_f / runners.size).ceil
+
+  shortfalls = []
+  runners.each do |acct|
+    credit = ScoutDirections.get_credit(scout_sheet, acct)
+    shortfalls << acct if credit.nil? || credit < per_person
+  end
+
+  unless shortfalls.empty?
+    session.instance_variable_set(:@bounty_pending_pot, nil)
+    return [false, shortfalls, per_person]
+  end
+
+  runners.each do |acct|
+    ScoutDirections.add_credits(scout_sheet, acct, -per_person)
+    creature_sheet.mark_bounty_participated!(acct, today)
+  end
+
+  session.bounty_pot = per_person * runners.size
+  session.bounty_per_person = per_person
+  session.instance_variable_set(:@bounty_pending_pot, nil)
+  [true, nil, per_person]
+end
+
 def post_session_thread(session, text, last_post_time)
-  dm = ($trigger_sheet.read_visibility != 'public')
+  # 세션 시작 시 한 번 읽어 고정한 값을 재사용합니다 (매 안내마다 시트를
+  # 다시 읽지 않음). 혹시 세션에 값이 없는 예외 상황이면 그때만 폴백으로 읽습니다.
+  dm = session.dm_visibility
+  dm = ($trigger_sheet.read_visibility != 'public') if dm.nil?
   now = Time.now
   sleep_time = POST_INTERVAL_SECONDS - (now - last_post_time)
   sleep(sleep_time) if sleep_time > 0
@@ -128,8 +182,14 @@ rescue => e
   puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
 end
 
+# 운영진 전용: 보스스킬 시트 캐시를 강제로 비워 다음 조회 때 새로 읽게 한다.
+# 보스스킬 탭(전조/대상수 등)을 수정한 뒤 봇 재시작 없이 즉시 반영하려면 사용.
+def cache_reset_text?(text)
+  text.to_s.include?('[스킬캐시초기화]')
+end
+
 def battle_start_text?(text)
-  text.to_s.include?('[전투시작]') || text.to_s.match?(/\[전투시작\//)
+  text.to_s.include?('[전투시작]') || text.to_s.match?(/\[전투시작\//) || bounty_start_match(text)
 end
 
 def battle_end_text?(text)
@@ -449,6 +509,7 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
       creature[:current_skill] = override[:skill].to_s.strip
       creature[:pattern]       = creature[:current_skill]
       apply_boss_skill_definition!(creature, creature_sheet)
+      ctx[:prev_boss_skill] = creature[:current_skill]
     end
     if override[:cells].to_a.any?
       creature[:skill_range]   = override[:cells].join(',')
@@ -530,7 +591,7 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
                  "지원: [스킬명/아이디]\n" \
                  "방어: [스킬명/아이디]\n" \
                  "이동: [이동/좌표]\n" \
-                 "이탈: [도망가기] 또는 [말걸기]\n" \
+                 "아이템 사용: [물약이름/아이디] (ex [위겐웰드 물약/아이디], 소지품에 있을경우)\n" \
                  "입력 대기: 5분\n" \
                  "───────────────────"
 
@@ -585,7 +646,7 @@ def process_action_for_session(session, username, text, processed_set, processed
   )
 
   changed = session.actions.size > before
-  processed_action_status_ids.add(status_id.to_s) if processed_action_status_ids && changed
+  processed_action_status_ids.add(status_id.to_s) if processed_action_status_ids
   changed
 end
 
@@ -596,20 +657,39 @@ def award_victory_credits!(session, scout_sheet, last_post_time)
   return last_post_time unless representative
 
   reward = session.creature[:reward].to_i
-  return last_post_time if reward <= 0
 
   creature_name = session.creature[:name].to_s.strip
   creature_name = '크리쳐' if creature_name.empty?
 
-  lines = ["[보상] #{creature_name} 처치 — 크레딧 +#{reward}"]
-  session.runner_names.each do |acct|
-    new_total = ScoutDirections.add_credits(scout_sheet, acct, reward)
-    lines << if new_total
-               "@#{acct} 보유 크레딧: #{new_total}"
-             else
-               "@#{acct} 크레딧 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
-             end
+  lines = []
+
+  if reward > 0
+    lines << "[보상] #{creature_name} 처치 — 크레딧 +#{reward}"
+    session.runner_names.each do |acct|
+      new_total = ScoutDirections.add_credits(scout_sheet, acct, reward)
+      lines << if new_total
+                 "@#{acct} 보유 크레딧: #{new_total}"
+               else
+                 "@#{acct} 크레딧 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
+               end
+    end
   end
+
+  # 현상금 사냥: 걸린 판돈의 2배를 참여자에게 1/n씩 지급한다.
+  if session.bounty_pot.to_i > 0
+    bounty_reward_per_person = session.bounty_per_person.to_i * 2
+    lines << "[현상금 달성] 판돈 #{session.bounty_pot}크레딧 → 2배 정산"
+    session.runner_names.each do |acct|
+      new_total = ScoutDirections.add_credits(scout_sheet, acct, bounty_reward_per_person)
+      lines << if new_total
+                 "@#{acct} 현상금 +#{bounty_reward_per_person} (보유: #{new_total})"
+               else
+                 "@#{acct} 현상금 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
+               end
+    end
+  end
+
+  return last_post_time if lines.empty?
 
   begin
     response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}", last_post_time)
@@ -627,25 +707,29 @@ def confiscate_defeat_credits!(session, scout_sheet, last_post_time)
   return last_post_time unless scout_sheet
   creature_name = session.creature[:name].to_s.strip
   creature_name = '크리쳐' if creature_name.empty?
-  lines = ["[패배] #{creature_name}에게 전투 불능 — 크레딧 압수"]
+  # 2026-08-13 사양 변경: 패배 시 크레딧 압수 제거. 대신 조사상태 위치를
+  # 비워 초기화한다 ("복귀") — 이후 [탐사]/[조사]는 위치 정보가 없어
+  # 자연히 막히고, 다시 [탐험] 또는 [위치/장소명]으로만 진행할 수 있다.
+  # 전투불능 플래그(최근행동='전투불능')도 함께 남겨 위치/조사 명령에서
+  # 명확한 안내 문구를 띄운다.
+  lines = ["[패배] #{creature_name}에게 전인원 전투 불능"]
+  lines << "탐험 및 조사를 중지합니다."
+  if session.bounty_pot.to_i > 0
+    lines << "[현상금 실패] 걸었던 판돈 #{session.bounty_pot}크레딧이 소멸했습니다."
+  end
   session.runner_names.each do |acct|
-    result = ScoutDirections.confiscate_credits(scout_sheet, acct, 10, 30)
-    lines << if result
-               taken, new_total = result
-               "@#{acct} 크레딧 -#{taken} (보유 크레딧: #{new_total})"
-             else
-               "@#{acct} 크레딧 압수 실패 (조사봇 계정 정보를 찾을 수 없음)"
-             end
+    ScoutDirections.mark_incapacitated!(scout_sheet, acct)
+    ScoutDirections.clear_location!(scout_sheet, acct)
   end
   begin
     response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}", last_post_time)
     new_time
   rescue => e
-    puts "[전투봇] [세션 #{session.id}] 패배 크레딧 압수 안내 실패: #{e.class}: #{e.message}"
+    puts "[전투봇] [세션 #{session.id}] 패배 안내 실패: #{e.class}: #{e.message}"
     last_post_time
   end
 rescue => e
-  puts "[전투봇] [세션 #{session.id}] 패배 크레딧 압수 실패: #{e.class}: #{e.message}"
+  puts "[전투봇] [세션 #{session.id}] 패배 처리 실패: #{e.class}: #{e.message}"
   last_post_time
 end
 
@@ -774,9 +858,27 @@ def flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet
     session.processed_messages = {}
     session.start_time = Time.now
     session.auto_next_round_timer = nil
+    # 필사즉생 과잉피해 잠금은 정확히 1라운드만 적용되어야 한다. 플레이어가
+    # 아무 메시지도 보내지 않고 라운드가 타임아웃되면 record_battle_action의
+    # 소비 로직을 못 거치므로 잠금이 계속 이월되는 문제가 있었다. 새 라운드
+    # 시작 시점에 무조건 자동으로 "행동불가" 처리하고 잠금을 해제해 이월을 막는다.
+    if ctx && ctx[:action_locked] && ctx[:action_locked].any?
+      puts "[전투봇] [세션 #{session.id}] action_locked 강제소비 실행 → #{ctx[:action_locked].keys.join(', ')} (#{session.round}라운드)"
+      ctx[:action_locked].keys.each do |locked_name|
+        session.actions[locked_name] = { type: '행동불가', target: '' }
+        session.processed_messages[locked_name] = true
+      end
+      ctx[:action_locked] = {}
+    end
 
     if session.auto_mode
-      auto_skill = select_auto_skill(session.creature, creature_sheet)
+      # '현재스킬'이 채워져 있으면 자동 모드여도 무작위 선택 대신 그 값을
+      # 그대로 고정 사용한다. 세션 시작 시 캐시된 값이 아니라 매 라운드
+      # 시트에서 새로 읽어, 전투 도중 운영진이 값을 바꾸면 다음 라운드부터
+      # 바로 반영되도록 한다.
+      fresh_creature = creature_from_stats_sheet_by_name(creature_sheet, session.creature[:name])
+      fixed_skill = fresh_creature ? fresh_creature[:current_skill].to_s.strip : ''
+      auto_skill = fixed_skill.empty? ? select_auto_skill(session.creature, creature_sheet, session.passive_ctx[:prev_boss_skill]) : fixed_skill
       if auto_skill
         session.passive_ctx[:boss_override] = { skill: auto_skill }
         session.awaiting_boss = false
@@ -831,6 +933,18 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     session.processed_messages = {}
     session.start_time = Time.now
     session.auto_next_round_timer = nil
+    # 필사즉생 과잉피해 잠금은 정확히 1라운드만 적용되어야 한다. 플레이어가
+    # 아무 메시지도 보내지 않고 라운드가 타임아웃되면 record_battle_action의
+    # 소비 로직을 못 거치므로 잠금이 계속 이월되는 문제가 있었다. 새 라운드
+    # 시작 시점에 무조건 자동으로 "행동불가" 처리하고 잠금을 해제해 이월을 막는다.
+    if ctx && ctx[:action_locked] && ctx[:action_locked].any?
+      puts "[전투봇] [세션 #{session.id}] action_locked 강제소비 실행 → #{ctx[:action_locked].keys.join(', ')} (#{session.round}라운드)"
+      ctx[:action_locked].keys.each do |locked_name|
+        session.actions[locked_name] = { type: '행동불가', target: '' }
+        session.processed_messages[locked_name] = true
+      end
+      ctx[:action_locked] = {}
+    end
     begin
       response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n[안내] 라운드 정산 중 오류가 발생했습니다. 운영 계정이 보스 행동을 입력하면 다음 라운드로 진행됩니다.", last_post_time)
       last_post_time = new_time
@@ -892,13 +1006,18 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
   flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
 end
 
-def select_auto_skill(creature, creature_sheet)
+def select_auto_skill(creature, creature_sheet, prev_skill = nil)
   return nil unless creature && creature_sheet
   begin
     rows = creature_sheet.read("'보스스킬'!A2:A")
     names = rows.map { |r| r[0].to_s.strip }.reject(&:empty?)
     return nil if names.empty?
-    names.sample
+    # 직전 라운드와 같은 스킬은 후보에서 제외해 연속 사용을 막는다.
+    # (선택지가 그 스킬 하나뿐이면 어쩔 수 없이 그대로 반복 사용)
+    prev = prev_skill.to_s.strip
+    candidates = prev.empty? ? names : names.reject { |n| n == prev }
+    candidates = names if candidates.empty?
+    candidates.sample
   rescue => e
     puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
     nil
@@ -964,6 +1083,14 @@ loop do
       username = sender['username'].to_s.gsub('@', '').strip
       content = clean_html(last_status['content'])
 
+      if cache_reset_text?(content)
+        $boss_skill_cache = nil
+        puts "[전투봇] 보스스킬 캐시 초기화 (DM, @#{username})"
+        post_battle_thread("@#{username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", true, last_status['id'])
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
       if battle_start_text?(content)
         if sessions.key?(last_status['id'])
           processed_dm_ids.add(dm_id)
@@ -971,11 +1098,18 @@ loop do
         end
         session = create_battle_session_from_status(last_status, content, :dm, creature_sheet, BOT_USERNAME, username)
         if session
-          sessions[session.id] = session
-          auto_enabled = $trigger_sheet.read_auto_mode
-          session.auto_mode = auto_enabled if auto_enabled
-          puts "[전투봇] [세션 #{session.id}] DM 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
-          sheet_log(creature_sheet, session.id, session.round, '전투 시작', "DM / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
+          if ok == :already_participated
+            listener.send_dm(username, "[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          elsif ok == false
+            listener.send_dm(username, "[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          else
+            sessions[session.id] = session
+            auto_enabled = $trigger_sheet.read_auto_mode
+            session.auto_mode = auto_enabled if auto_enabled
+            puts "[전투봇] [세션 #{session.id}] DM 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+            sheet_log(creature_sheet, session.id, session.round, '전투 시작', "DM / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          end
         end
         processed_dm_ids.add(dm_id)
         next
@@ -1060,6 +1194,15 @@ loop do
 
       content = clean_html(status['content'])
 
+      if cache_reset_text?(content)
+        $boss_skill_cache = nil
+        pub_username = status.dig('account', 'username').to_s
+        puts "[전투봇] 보스스킬 캐시 초기화 (공개, @#{pub_username})"
+        post_battle_thread("@#{pub_username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", false, status_id)
+        processed_statuses.add(status_id)
+        next
+      end
+
       if battle_start_text?(content)
         if sessions.key?(status_id)
           processed_statuses.add(status_id)
@@ -1067,11 +1210,18 @@ loop do
         end
         session = create_battle_session_from_status(status, content, :public, creature_sheet, BOT_USERNAME, nil)
         if session
-          sessions[session.id] = session
-          auto_enabled = $trigger_sheet.read_auto_mode
-          session.auto_mode = auto_enabled if auto_enabled
-          puts "[전투봇] [세션 #{session.id}] 공개 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
-          sheet_log(creature_sheet, session.id, session.round, '전투 시작', "공개 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
+          if ok == :already_participated
+            listener.post_public("[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          elsif ok == false
+            listener.post_public("[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          else
+            sessions[session.id] = session
+            auto_enabled = $trigger_sheet.read_auto_mode
+            session.auto_mode = auto_enabled if auto_enabled
+            puts "[전투봇] [세션 #{session.id}] 공개 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+            sheet_log(creature_sheet, session.id, session.round, '전투 시작', "공개 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          end
         else
           listener.post_public('[전투 오류] 참여자가 없습니다. 태그를 추가하세요.')
           puts '[전투봇] 태그된 러너 없음'
@@ -1171,6 +1321,13 @@ loop do
         next
       end
 
+      # DM(visibility: direct)으로 온 멘션 알림은 대화(conversations) 경로에서 이미
+      # 처리되므로, 여기서 중복 처리하지 않도록 건너뛴다.
+      if status['visibility'].to_s == 'direct'
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
       username = notification.dig('account', 'username').to_s.gsub('@', '').strip
       text = clean_html(status['content'])
 
@@ -1191,6 +1348,14 @@ loop do
       end
       handled_boss_status_ids.delete(boss_sid)
 
+      if cache_reset_text?(text)
+        $boss_skill_cache = nil
+        puts "[전투봇] 보스스킬 캐시 초기화 (멘션, @#{username})"
+        post_battle_thread("@#{username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", false, status['id'])
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
       if battle_start_text?(text)
         if sessions.key?(status['id'])
           processed_notification_ids.add(notification_id)
@@ -1198,12 +1363,19 @@ loop do
         end
         session = create_battle_session_from_status(status, text, :mention, creature_sheet, BOT_USERNAME, username)
         if session
-          sessions[session.id] = session
-          processed_statuses.add(status['id'])
-          auto_enabled = $trigger_sheet.read_auto_mode
-          session.auto_mode = auto_enabled if auto_enabled
-          puts "[전투봇] [세션 #{session.id}] 멘션 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
-          sheet_log(creature_sheet, session.id, session.round, '전투 시작', "멘션 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
+          if ok == :already_participated
+            listener.post_public("[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          elsif ok == false
+            listener.post_public("[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          else
+            sessions[session.id] = session
+            processed_statuses.add(status['id'])
+            auto_enabled = $trigger_sheet.read_auto_mode
+            session.auto_mode = auto_enabled if auto_enabled
+            puts "[전투봇] [세션 #{session.id}] 멘션 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+            sheet_log(creature_sheet, session.id, session.round, '전투 시작', "멘션 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          end
         else
           puts "[전투봇] 멘션 전투시작 실패: 참여자 없음 또는 파싱 실패 (@#{username})"
         end
