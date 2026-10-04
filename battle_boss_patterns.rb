@@ -172,7 +172,7 @@ module BattleBossPatterns
 
     stats = stats_of ? stats_of.call(name) : {}
 
-    hit_detail = BattleCalculator.hit_detail(creature[:tec].to_i)
+    hit_detail = BattleCalculator.hit_detail(creature[:tec].to_i, base: creature[:hit_base].to_i)
     log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
     unless hit_detail[:success]
       log << "#{dname} 회피 — 피해 없음"
@@ -223,7 +223,8 @@ module BattleBossPatterns
       if rev_actor && rev_actor[:hp].to_i > 0
         rev_dname = rev_actor[:display_name].to_s.strip
         rev_dname = rev_by.to_s if rev_dname.empty?
-        rev_dmg = BattleCalculator.calc_damage((dmg * ctx[:revenge][name][:multiplier]).ceil, creature[:dur].to_i)
+        creature_eff_dur_rev = (creature[:dur].to_i + dur_bonus['__creature__'].to_i) * defended_multiplier['__creature__'].to_f
+        rev_dmg = BattleCalculator.calc_damage((dmg * ctx[:revenge][name][:multiplier]).ceil, creature_eff_dur_rev.to_i)
         creature[:hp] = [creature[:hp].to_i - rev_dmg, 0].max
         log << "#{rev_dname}의 복수 → #{creature[:name]}에게 #{rev_dmg} 반격 피해"
       end
@@ -231,7 +232,8 @@ module BattleBossPatterns
 
     if ctx[:counter_debuff] && ctx[:counter_debuff][name] && dmg > 0
       counter_mult = ctx[:counter_debuff][name][:multiplier].to_f
-      counter_dmg = BattleCalculator.calc_damage((dmg * counter_mult).ceil, creature[:dur].to_i)
+      creature_eff_dur_counter = (creature[:dur].to_i + dur_bonus['__creature__'].to_i) * defended_multiplier['__creature__'].to_f
+      counter_dmg = BattleCalculator.calc_damage((dmg * counter_mult).ceil, creature_eff_dur_counter.to_i)
       creature[:hp] = [creature[:hp].to_i - counter_dmg, 0].max
       log << "#{dname}의 반격 디버프 → #{creature[:name]}에게 #{counter_dmg} 반사 피해"
     end

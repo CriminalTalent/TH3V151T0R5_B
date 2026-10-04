@@ -51,15 +51,15 @@ class BattleCalculator
     end
   end
 
-  def self.hit?(attacker_tec)
-    hit_rate = [[60 + attacker_tec, 0].max, 100].min
+  def self.hit?(attacker_tec, base: 60)
+    hit_rate = [[base.to_i + attacker_tec.to_i, 0].max, 100].min
     roll = rand(1..100)
     puts "[명중] 명중률 #{hit_rate}% / 주사위 #{roll} → #{roll <= hit_rate ? '명중' : '빗나감'}"
     roll <= hit_rate
   end
 
-  def self.evade?(target_agi)
-    evade_rate = target_agi.to_i
+  def self.evade?(target_agi, base: 0)
+    evade_rate = [[base.to_i + target_agi.to_i, 0].max, 100].min
     return false if evade_rate <= 0
     roll = rand(1..100)
     puts "[회피] 회피율 #{evade_rate}% / 주사위 #{roll} → #{roll <= evade_rate ? '회피' : '피격'}"
@@ -121,16 +121,16 @@ class BattleCalculator
 end
 
 class BattleCalculator
-  def self.hit_detail(attacker_tec)
-    rate = [[60 + attacker_tec.to_i, 0].max, 100].min
+  def self.hit_detail(attacker_tec, base: 60)
+    rate = [[base.to_i + attacker_tec.to_i, 0].max, 100].min
     roll = rand(1..100)
     success = roll <= rate
     puts "[명중] 명중률 #{rate}% / 주사위 #{roll} → #{success ? '명중' : '빗나감'}"
     { success: success, rate: rate, roll: roll }
   end
 
-  def self.evade_detail(target_agi)
-    rate = [[target_agi.to_i, 0].max, 100].min
+  def self.evade_detail(target_agi, base: 0)
+    rate = [[base.to_i + target_agi.to_i, 0].max, 100].min
     return { success: false, rate: rate, roll: nil } if rate <= 0
 
     roll = rand(1..100)

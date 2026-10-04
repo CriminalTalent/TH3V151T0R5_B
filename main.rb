@@ -567,6 +567,13 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
     end
   end
 
+  # 크리쳐가 러너 전용 지원/방어 스킬(자가구원 등)을 쓰기로 확정된 경우엔
+  # "공격 대상/위력" 형식이 아니라 스킬명만 안내한다.
+  creature_skill_def = BattleSkills.get(creature[:current_skill].to_s.strip)
+  if creature_skill_def && !BattleSkills.attack?(creature[:current_skill].to_s.strip)
+    boss_preview = "#{creature[:name]}이(가) #{creature[:current_skill]}을(를) 사용합니다.\n\n"
+  end
+
   omen = creature[:omen].to_s.strip
   omen_block = omen.empty? ? '' : "#{omen}\n\n"
 
@@ -590,7 +597,7 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
                  "공격: #{attack_lines.join("\n")}\n" \
                  "지원: [스킬명/아이디]\n" \
                  "방어: [스킬명/아이디]\n" \
-                 "이동: [이동/좌표]\n" \
+                 "순간이동: [순간이동/좌표] (거리 제한 없음)\n" \
                  "아이템 사용: [물약이름/아이디] (ex [위겐웰드 물약/아이디], 소지품에 있을경우)\n" \
                  "입력 대기: 5분\n" \
                  "───────────────────"
@@ -878,7 +885,7 @@ def flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet
       # 바로 반영되도록 한다.
       fresh_creature = creature_from_stats_sheet_by_name(creature_sheet, session.creature[:name])
       fixed_skill = fresh_creature ? fresh_creature[:current_skill].to_s.strip : ''
-      auto_skill = fixed_skill.empty? ? select_auto_skill(session.creature, creature_sheet, session.passive_ctx[:prev_boss_skill]) : fixed_skill
+      auto_skill = fixed_skill.empty? ? select_auto_skill(session.creature, creature_sheet, session.passive_ctx) : fixed_skill
       if auto_skill
         session.passive_ctx[:boss_override] = { skill: auto_skill }
         session.awaiting_boss = false
@@ -1006,18 +1013,35 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
   flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
 end
 
-def select_auto_skill(creature, creature_sheet, prev_skill = nil)
+CREATURE_COOLDOWN_KEY = '__creature__'.freeze
+
+# 보스스킬 탭(A=스킬명, D=쿨타임)에서, 매 라운드 "지금 쿨타임이 돌아온
+# 스킬" 전부를 후보로 모아 그중 무작위로 하나를 선택한다. 시트에 적힌
+# 순서는 참고하지 않는다. 선택된 스킬의 쿨타임은 여기서 세팅하지 않고,
+# 실제로 정산 단계에서 지원/방어 스킬로 실행될 때 cooldown_gate!가 러너와
+# 동일한 방식으로 세팅한다. 전부 쿨타임 중이면 어쩔 수 없이 전체 목록에서
+# 무작위로 선택한다(빈 라운드 방지).
+def select_auto_skill(creature, creature_sheet, ctx = nil)
   return nil unless creature && creature_sheet
   begin
-    rows = creature_sheet.read("'보스스킬'!A2:A")
-    names = rows.map { |r| r[0].to_s.strip }.reject(&:empty?)
-    return nil if names.empty?
-    # 직전 라운드와 같은 스킬은 후보에서 제외해 연속 사용을 막는다.
-    # (선택지가 그 스킬 하나뿐이면 어쩔 수 없이 그대로 반복 사용)
-    prev = prev_skill.to_s.strip
-    candidates = prev.empty? ? names : names.reject { |n| n == prev }
-    candidates = names if candidates.empty?
-    candidates.sample
+    rows = boss_skill_rows(creature_sheet)
+    all_skills = rows.map { |r| [r[0].to_s.strip, r[3].to_s.strip.to_i] }.reject { |name, _| name.empty? }
+    return nil if all_skills.empty?
+
+    if ctx.is_a?(Hash)
+      cooldowns = (ctx[:cooldowns] ||= Hash.new { |h, k| h[k] = {} })[CREATURE_COOLDOWN_KEY]
+      # 시트에 적힌 순서는 무시하고, 매 라운드 "지금 쿨타임이 돌아온 스킬"
+      # 전부를 후보로 모아서 그중 무작위로 하나를 뽑는다. 전부 쿨타임 중이면
+      # 어쩔 수 없이 전체 목록에서 무작위로 뽑는다(빈 라운드 방지).
+      # 쿨타임 세팅 자체는 여기서 하지 않는다 — 실제로 이 스킬이 정산
+      # 단계에서 지원/방어 스킬로 실행될 때 cooldown_gate!가 러너와 동일한
+      # 방식으로 세팅한다.
+      ready = all_skills.reject { |name, _| cooldowns[name].to_i > 0 }
+      ready = all_skills if ready.empty?
+      ready.sample.first
+    else
+      all_skills.sample.first
+    end
   rescue => e
     puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
     nil

@@ -48,6 +48,9 @@ def parse_creature_stats_row(row)
     agi:     row[8].to_i,
     tec:     row[9].to_i,
     luck:    row[10].to_i,
+    hit_base:   row[13].to_s.strip.empty? ? 60 : row[13].to_i,
+    evade_base: row[14].to_s.strip.empty? ? 0 : row[14].to_i,
+    facing:     ['상', '하', '좌', '우'].include?(row[15].to_s.strip) ? row[15].to_s.strip : '하',
     current_skill: current_skill,
     pattern: current_skill,
     skill_target: '',
@@ -284,6 +287,9 @@ def creature_from_start_content(content, creature_sheet)
     agi: 0,
     tec: 0,
     luck: 0,
+    hit_base: 60,
+    evade_base: 0,
+    facing: '하',
     pos: 'D4',
     size: '1x1',
     status: ''
@@ -409,10 +415,10 @@ def validate_action(username, action_type, action_target, runner_names, view_she
     return [false, '현재 행동할 수 없는 상태입니다.']
   end
 
-  if action_type == '이동'
+  if action_type == '순간이동'
     coord = LOCATION_MAP[action_target] || action_target
     coord = coord.to_s.strip.upcase
-    ok, msg = BattleGrid.movable?(actor[:pos], coord, runner_state, creature, actor_name: username)
+    ok, msg = BattleGrid.movable?(actor[:pos], coord, runner_state, creature, actor_name: username, teleport: true)
     return [false, msg] unless ok
     return [true, nil]
   end
@@ -455,6 +461,9 @@ def validate_action(username, action_type, action_target, runner_names, view_she
       rush_dist = BattleGrid.distance_to_creature(rush_dest, creature)
       if rush_dist.nil? || rush_dist > 1
         return [false, "습격은 #{creature_name} 바로 옆(1칸 이내)에 머무는 좌표만 지정할 수 있습니다. 지정 좌표: #{rush_dest}"]
+      end
+      unless BattleGrid.straight_line?(actor[:pos], rush_dest)
+        return [false, "습격은 현재 위치(#{actor[:pos]})에서 가로/세로/대각선 직선상에 있는 좌표로만 이동할 수 있습니다. 지정 좌표: #{rush_dest}"]
       end
     end
   elsif BattleSkills.support?(action_type) || BattleSkills.defense?(action_type)
@@ -537,14 +546,14 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     return
   end
 
-  match = text.match(/\[(#{command_pattern}|이동)(?:\/(.+?))?\]/)
+  match = text.match(/\[(#{command_pattern}|순간이동)(?:\/(.+?))?\]/)
 
   unless match
     # 다중 태그, 안내문, 잡담처럼 전투 명령이 아닌 글은 조용히 무시합니다.
     # 단, 대괄호 명령처럼 보이는데 형식만 틀린 경우에만 안내합니다.
     if text.match?(/\[[^\]]+\]/)
       puts "[전투봇] 행동 형식 불일치: @#{username} -> #{text}"
-      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/보스이름], [스킬명/대상], [방어/아이디], [이동/좌표]  중 하나로 입력해주세요.')
+      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/보스이름], [스킬명/대상], [방어/아이디], [순간이동/좌표]  중 하나로 입력해주세요.')
     else
       puts "[전투봇] 비명령 메시지 무시: @#{username} -> #{text}"
     end
@@ -556,7 +565,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   action_target = normalize_target(match[2])
 
   # 쿨타임이 돌지 않은 스킬을 다시 쓰면 즉시 안내하고 행동으로 등록하지 않습니다.
-  if ctx && action_type != '이동'
+  if ctx && action_type != '순간이동'
     skill = BattleSkills.get(action_type)
     if skill
       if skill[:once] && ctx[:once_used][username][action_type]
@@ -617,7 +626,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
 
   action_meta = {}
 
-  if action_type == '이동'
+  if action_type == '순간이동'
     coord = LOCATION_MAP[action_target] || action_target
     coord = coord.to_s.strip.upcase
 
@@ -641,7 +650,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
       action_meta[:from] = from_pos
       action_meta[:to] = coord
 
-      puts "[전투봇] #{username} 이동 #{from_pos} → #{coord}"
+      puts "[전투봇] #{username} 순간이동 #{from_pos} → #{coord}"
     end
   end
 

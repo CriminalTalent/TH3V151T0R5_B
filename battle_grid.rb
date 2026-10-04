@@ -98,12 +98,12 @@ module BattleGrid
       occupied_by_creature(creature).key?(pos)
   end
 
-  def movable?(from, to, runner_state, creature, actor_name: nil)
+  def movable?(from, to, runner_state, creature, actor_name: nil, teleport: false)
     from = from.to_s.strip.upcase
     to = to.to_s.strip.upcase
 
     return [false, '이동 좌표가 올바르지 않습니다. A1~G8 범위로 입력해주세요.'] unless valid_pos?(to)
-    return [false, '이동은 가로/세로/대각선으로 1칸만 가능합니다.'] unless adjacent?(from, to)
+    return [false, '이동은 가로/세로/대각선으로 1칸만 가능합니다.'] unless teleport || adjacent?(from, to)
 
     runner_block = occupied_by_runners(runner_state, except_name: actor_name)[to]
     return [false, "이미 #{runner_block}이(가) 있는 칸입니다."] if runner_block
@@ -177,6 +177,14 @@ module BattleGrid
   # 습격 전용: 목적지까지 완전히 뚫려있지 않아도, 막히기 직전의
   # 마지막 빈 칸까지는 돌진해서 그 자리에 멈춘다 ("부딪혀서 멈춘다").
   # 시작 칸부터 막혀 있으면 제자리(from)를 반환한다.
+  # 가로/세로/대각선 직선상에 있는 좌표인지 판정한다. (습격 이동 조건)
+  def straight_line?(from, to)
+    ax, ay = parse_pos(from)
+    bx, by = parse_pos(to)
+    return false unless ax && bx
+    ax == bx || ay == by || (bx - ax).abs == (by - ay).abs
+  end
+
   def rush_landing_cell(from, to, runner_state, creature, actor_name: nil)
     ax, ay = parse_pos(from)
     bx, by = parse_pos(to)
