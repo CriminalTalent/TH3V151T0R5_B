@@ -35,9 +35,9 @@ class BattleProcessor
     apply_corrections
     process_support
     process_move
+    process_defense
     process_attack
     process_creature_attack
-    process_defense
     apply_house_passives_post
     build_result_log
     updated_cooldowns = advance_cooldowns
@@ -100,7 +100,7 @@ class BattleProcessor
         atk_up: 0, dur_up: 0, agi_up: 0, tec_up: 0, luck_up: 0,
         shield: 0, guardian: nil, guaranteed: false,
         indomitable: false, stunned: false, confused: 0,
-        blinded: false, revenge_ready: false, defense_stance: false,
+        blinded: false, revenge_ready: false, defense_count: 0,
         no_action_last_round: false, took_damage_last_round: false,
         took_damage_this_round: false
       }
@@ -635,7 +635,9 @@ class BattleProcessor
           end
         end
 
-        effective_dur = @buffs[actual_target][:defense_stance] ? (tgt_dur_final * 1.5).ceil : tgt_dur_final
+        dc3 = @buffs[actual_target][:defense_count]
+        effective_dur = tgt_dur_final
+        dc3.times { effective_dur = (effective_dur * 1.5).ceil }
         dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
 
         if @buffs[actual_target][:hufflepuff_guard] && @states[actual_target][:hp] - dmg <= 0
@@ -753,7 +755,9 @@ class BattleProcessor
       )
 
       tgt_dur = (tgt_base[:dur] + @buffs[tname][:dur_up]).to_i
-      effective_dur = @buffs[tname][:defense_stance] ? (tgt_dur * 1.5).ceil : tgt_dur
+      dc4 = @buffs[tname][:defense_count]
+      effective_dur = tgt_dur
+      dc4.times { effective_dur = (effective_dur * 1.5).ceil }
       dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
 
       if @buffs[tname][:shield] > 0
@@ -812,7 +816,10 @@ class BattleProcessor
     )
 
     tgt_dur = (tgt_base[:dur] + @buffs[target][:dur_up]).to_i
-    dmg = BattleCalculator.calc_damage(raw_dmg, tgt_dur)
+    dc5 = @buffs[target][:defense_count]
+    effective_dur = tgt_dur
+    dc5.times { effective_dur = (effective_dur * 1.5).ceil }
+    dmg = BattleCalculator.calc_damage(raw_dmg, effective_dur)
 
     if @buffs[target][:shield] > 0
       absorbed = [@buffs[target][:shield], dmg].min
@@ -848,8 +855,9 @@ class BattleProcessor
         t = cmd[:targets].first || name
         rng = '근접'
         if @buffs[t] && @states[t] && BattleCalculator.in_range?(rng, @states[name][:pos], @states[t][:pos])
-          @buffs[t][:defense_stance] = true
-          @log[:defense] << "#{name} → [방어] #{t} 방어태세 (내구도 1.5배)"
+          @buffs[t][:defense_count] += 1
+          stack_mult = (1.5 * @buffs[t][:defense_count])
+          @log[:defense] << "#{name} → [방어] #{t} 방어태세 (누적 #{@buffs[t][:defense_count]}회, 내구도 #{stack_mult}배)"
         else
           @log[:defense] << "#{name} → [방어] #{t}: 사거리 밖"
         end
