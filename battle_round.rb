@@ -343,6 +343,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   end
 
   pending_absorb = nil
+  ctx[:potion_used] = []
 
   # 1) 지원
   battle_actions.each do |name, act|
@@ -386,12 +387,19 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :heal_fixed
       healed = []
-      target_names.each do |tname|
+      # 전투 중 물약은 대상 1명만 회복한다. 체력 0인 대상은 효과 없음, 소지품 차감 없음.
+      target_names.first(1).each do |tname|
         t = state_of.call(tname)
-        next unless t && t[:hp].to_i > 0
+        unless t && t[:hp].to_i > 0
+          log << "#{dname}의 #{skill_name} → #{display_name_of.call(tname)}은(는) 행동불능이라 효과가 없습니다." if t
+          next
+        end
         before = t[:hp].to_i
         t[:hp] = [before + skill[:value].to_i, t[:max_hp].to_i].min
         healed << "#{display_name_of.call(tname)} 건강 +#{t[:hp] - before}"
+        if BattleItems.potion?(skill_name)
+          (ctx[:potion_used] ||= []) << { user: name, skill: skill_name }
+        end
       end
       log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :heal_fixed_self

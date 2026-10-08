@@ -55,6 +55,7 @@ view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
 listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
 
 scout_sheet      = SCOUT_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_SHEET_ID, CREDENTIALS_PATH)
+$battle_scout_sheet = scout_sheet
 scout_grid_sheet = SCOUT_GRID_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_GRID_SHEET_ID, CREDENTIALS_PATH)
 
 $trigger_sheet = SheetManager.new(TRIGGER_SHEET_ID, CREDENTIALS_PATH)
@@ -960,6 +961,8 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     end
     return [last_post_time, false]
   end
+
+  BattleItems.consume_all!(ctx)
 
   if ctx[:escaped_by]
     escaped_name = ctx.delete(:escaped_by)

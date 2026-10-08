@@ -503,13 +503,24 @@ def validate_action(username, action_type, action_target, runner_names, view_she
       end
     end
 
-    if target_runner && !BattleGrid.in_range?(actor[:pos], target_runner[:pos], skill[:range])
+    if BattleItems.potion?(action_type)
+      # 전투 중 물약: 사거리 제한 없음, 대상 1명만, 소지품 필요
+      potion_targets = target.to_s.split(',').map(&:strip).reject(&:empty?)
+      if potion_targets.size > 1
+        return [false, "전투 중 #{action_type}은(는) 1명에게만 사용할 수 있습니다. 예: [#{action_type}/아이디]"]
+      end
+      if BattleItems.owned?(username, action_type) == false
+        return [false, "소지품에 #{action_type}이(가) 없습니다."]
+      end
+    elsif target_runner && !BattleGrid.in_range?(actor[:pos], target_runner[:pos], skill[:range])
       return [false, "#{action_type}의 사거리 밖입니다. 현재 위치: #{actor[:pos]}, 대상 위치: #{target_runner[:pos]}"]
     end
   end
 
   [true, nil]
 end
+
+require_relative 'battle_items'
 
 def command_pattern
   BattleSkills.command_regex
