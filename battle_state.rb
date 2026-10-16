@@ -645,7 +645,12 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     runner = runner_state.find { |r| r[:name].to_s == username.to_s }
 
     if runner
-      from_pos = runner[:pos].to_s.strip.upcase
+      saved_from = nil
+      if ctx.is_a?(Hash) && ctx[:positions].is_a?(Hash)
+        saved_from = ctx[:positions][username.to_s] || ctx[:positions][username.to_s.to_sym]
+      end
+      saved_from = saved_from.to_s.strip.upcase
+      from_pos = saved_from.match?(/\A[A-G][1-8]\z/) ? saved_from : runner[:pos].to_s.strip.upcase
       runner[:pos] = coord
 
       # 화면 시트와 세션 위치를 함께 갱신합니다.
