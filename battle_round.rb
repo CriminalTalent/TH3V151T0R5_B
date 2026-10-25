@@ -799,6 +799,12 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       ats = stats_of.call(aname)
       adname = display_name_of.call(aname)
 
+      header_power = (s[:atk].to_i * skill[:ratio].to_f).ceil
+      log << "▶ #{dname}의 #{skill_name}"
+      log << "위력: #{header_power}" if header_power > 0
+      log << "대상: #{adname}"
+      log << ''
+
       hit_detail = BattleCalculator.hit_detail(s[:tec].to_i + tec_bonus[name])
       log << "#{dname}의 #{skill_name} → #{adname} 명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
 
