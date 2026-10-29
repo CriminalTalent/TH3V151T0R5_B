@@ -18,6 +18,8 @@ class DuelManager
   Duel = Struct.new(
     :id, :challenger, :team_a, :team_b, :accepted, :phase, :created_at,
     :prep_started_at, :positions, :reply_id, :announced_prep, :retry_after,
+    :round, :stats, :hp, :cooldowns, :actions, :round_started_at, :announced_round,
+    :next_round_at, :idle_rounds, :pending_post, :finishing, :ctx,
     keyword_init: true
   )
 
@@ -36,7 +38,8 @@ class DuelManager
     cmd = parse_command(text)
     duel = duel_of(username)
     position_input = duel && duel.phase == :prep && text.match?(/\[[A-Ga-g][1-8]\]/)
-    return false unless cmd || position_input
+    battle_input = duel && duel.phase == :battle && text.match?(ACTION_RE)
+    return false unless cmd || position_input || battle_input
 
     sid = status['id'].to_s
     return true if @seen.include?(sid)
@@ -49,7 +52,7 @@ class DuelManager
     when :accept    then handle_accept(username, status)
     when :decline   then handle_decline(username, status)
     when :cancel    then handle_cancel(username, status)
-    else handle_position(username, text, status)
+    else battle_input ? handle_action(username, text, status) : handle_position(username, text, status)
     end
     true
   rescue => e
@@ -59,7 +62,7 @@ class DuelManager
   end
 
   # 메인 루프에서 매번 호출한다. 만료 처리와 준비 라운드 진행을 맡는다.
-  def tick(runner_sheet:)
+  def tick(runner_sheet:, view_sheet: nil, scout_sheet: nil)
     now = Time.now
     @duels.values.each do |duel|
       case duel.phase
@@ -82,6 +85,8 @@ class DuelManager
           missing = (members(duel) - duel.positions.keys).map { |n| "@#{n}" }.join(' ')
           finish(duel, "시작 위치 입력 시간(5분)이 지나 결투가 취소되었습니다. (미입력: #{missing})")
         end
+      when :battle
+        tick_battle(duel, now, view_sheet, scout_sheet)
       end
     end
   rescue => e
@@ -298,13 +303,30 @@ class DuelManager
 
   def complete_prep(duel, runner_sheet)
     stats = runner_sheet.read_base_stats
-    size = duel.team_a.size
-    pos_lines = members(duel).map { |n| "· #{label(n, stats)} → #{duel.positions[n]}" }
-    finish(duel, "[결투 준비 완료] #{size}:#{size}\n\n" \
-                 "시작 위치\n#{pos_lines.join("\n")}\n\n" \
-                 "전장\n\n#{render_grid(duel, stats).join("\n")}\n" \
-                 "───────────────────\n" \
-                 "※ 결투는 시험 단계입니다. 공격·스킬 정산은 아직 지원하지 않아 여기서 종료합니다.")
+    duel.stats = {}
+    duel.hp = {}
+    members(duel).each do |n|
+      st = stats.find { |s| s[:name].to_s.casecmp?(n) }
+      unless st
+        return finish(duel, "스탯 시트에서 @#{n} 님의 정보를 찾지 못해 결투를 취소했습니다.")
+      end
+      if st[:hp].to_i <= 0
+        return finish(duel, "@#{n} 님의 체력이 0이라 결투를 취소했습니다.")
+      end
+      duel.stats[n] = st
+      duel.hp[n] = st[:hp].to_i
+    end
+    duel.cooldowns = Hash.new { |h, k| h[k] = {} }
+    duel.actions = {}
+    duel.round = 1
+    duel.idle_rounds = 0
+    duel.announced_round = false
+    duel.round_started_at = nil
+    duel.next_round_at = nil
+    duel.pending_post = nil
+    duel.finishing = false
+    duel.phase = :battle
+    puts "[결투] [#{duel.id}] 준비 완료 — 1라운드 시작"
   end
 
   def team_lines(title, list, stats)
@@ -348,6 +370,10 @@ class DuelManager
     lines
   end
 end
+
+require_relative 'duel_battle'
+require_relative 'duel_skills'
+require_relative 'duel_settle'
 
 DUEL_MANAGER = DuelManager.new
 puts "[결투] 결투 기능 켜짐 (허용 계정: #{ENV['DUEL_ALLOWED_USERS'].to_s.strip.empty? ? '전체' : ENV['DUEL_ALLOWED_USERS']})"

@@ -1085,7 +1085,9 @@ loop do
     end
 
     sessions.values.each { |session| check_prep_completion(session, creature_sheet) }
-    DUEL_MANAGER.tick(runner_sheet: runner_sheet) if defined?(DUEL_MANAGER)
+    DUEL_MANAGER.tick(runner_sheet: runner_sheet,
+                      view_sheet: (defined?(view_sheet) ? view_sheet : nil),
+                      scout_sheet: (defined?(scout_sheet) ? scout_sheet : nil)) if defined?(DUEL_MANAGER)
 
     sessions.values.each do |session|
       next unless session.auto_next_round_timer
