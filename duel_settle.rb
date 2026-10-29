@@ -54,6 +54,7 @@ class DuelManager
     else
       if act[:target]
         extra = act[:cost] ? " (소모 #{act[:cost]})" : ''
+        extra = " (#{act[:dest]}로 돌진)" if act[:dest]
         "#{act[:type]} → #{lab(duel, act[:target])}#{extra}"
       elsif act[:reset_skill]
         "#{act[:type]} → #{act[:targets].map { |t| lab(duel, t) }.join(', ')}의 [#{act[:reset_skill]}]"
@@ -91,7 +92,31 @@ class DuelManager
       agi_bonus[n] += buff_bonus(ctx, n, :agi)
     end
 
+    # 습격: 돌진 이동은 라운드 맨 앞에서 처리한다 (공격이 빗나가도 이동은 적용)
+    rush_info = {}
+    acted.each do |n|
+      act = duel.actions[n]
+      skill = BattleSkills.get(act[:type])
+      next unless skill && skill[:kind] == :rush
+      next unless duel.cooldowns[n][act[:type]].to_i <= 0
+
+      from = duel.positions[n]
+      landing = rush_landing(duel, n, from, act[:dest])
+      steps = duel_steps(from, act[:dest])
+      mult = steps >= 5 ? skill[:long_multiplier].to_f : skill[:multiplier].to_f
+      duel.positions[n] = landing if landing != from
+      rush_info[n] = { multiplier: mult }
+      log << "#{lab(duel, n)}의 습격 이동 #{from} → #{landing}" if landing != from
+    end
+
     ctx[:round] = round_no
+
+    ailing = lambda do |name|
+      ctx[:confusion_active][name].to_i >= round_no || ctx[:blind][name].to_i >= round_no
+    end
+    enemies_ailing = lambda do |name|
+      enemies_of(duel, name).any? { |e| ailing.call(e) }
+    end
 
     # 기숙사 패시브 (그리핀도르1, 래번클로1은 3-3 이후)
     passive_lines = []
@@ -118,7 +143,11 @@ class DuelManager
           passive_lines << "#{dn}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][n]}"
         end
       when '래번클로'
-        if s[:passive].to_s == '2'
+        if s[:passive].to_s == '1' && enemies_ailing.call(n)
+          b = (s[:atk].to_i * 0.5).ceil
+          atk_bonus[n] += b
+          passive_lines << "#{dn}: [래번클로] 적 상태이상 감지 — 마법능력 +#{b}"
+        elsif s[:passive].to_s == '2'
           prev_cat = BattleSkills.category(ctx[:prev_action][n])
           cur_cat = BattleSkills.category(duel.actions[n] && duel.actions[n][:type])
           if prev_cat && cur_cat && prev_cat != cur_cat
@@ -215,6 +244,16 @@ class DuelManager
           lab(duel, t)
         end
         log << "#{dname}의 응원 → #{applied.join(', ')} 행운 +#{skill[:value]} (#{skill[:turns]}턴)" if applied.any?
+      when :force_move
+        t = act[:targets].first
+        coord = act[:coord]
+        taken = alive_members(duel).find { |r| r != t && duel.positions[r] == coord }
+        if t && duel.hp[t].to_i > 0 && !taken
+          duel.positions[t] = coord
+          log << "#{dname}의 행운부여 → #{lab(duel, t)}을(를) #{coord}로 이동"
+        else
+          log << "#{dname}의 행운부여 실패 → #{coord}에는 이미 다른 참가자가 있습니다."
+        end
       when :cooldown_reset
         act[:targets].each { |t| duel.cooldowns[t].delete(act[:reset_skill]) }
         log << "#{dname}의 즉발 → #{act[:targets].map { |t| lab(duel, t) }.join(', ')}의 [#{act[:reset_skill]}] 쿨타임 초기화"
@@ -239,6 +278,21 @@ class DuelManager
       when :agi_buff_self
         agi_bonus[n] += skill[:value].to_i
         log << "#{dname}의 회피 → 민첩 +#{skill[:value]}"
+      when :revenge
+        names = act[:targets].map do |t|
+          ctx[:revenge][t] = { by: n, multiplier: skill[:multiplier].to_f }
+          lab(duel, t)
+        end
+        log << "#{dname}의 복수 → #{names.join(', ')} 피격 시 반격 대기" if names.any?
+      when :cover
+        t = act[:targets].first
+        if t && duel.hp[t].to_i > 0
+          ctx[:cover][t] = n
+          log << "#{dname}의 희생 → #{lab(duel, t)} 대신 피격 대기"
+        end
+      when :survive_once
+        ctx[:survive_once][n] = true
+        log << "#{dname}의 필사즉생 → 이번 턴 건강 0 이하 방지"
       when :dur_buff_area
         amount = ((s[:dur].to_i + dur_bonus[n]) * skill[:ratio].to_f).ceil
         affected = allies_in_range.call(n, skill[:range]).map do |r|
@@ -256,25 +310,44 @@ class DuelManager
     end
 
     # 3) 공격 (동시 정산: 피해를 모아 두었다가 한꺼번에 반영한다)
+    # 혼란/흙뿌리기를 먼저 처리해, 같은 라운드의 다른 공격에 상태이상이 반영되게 한다.
     damage = Hash.new(0)
-    acted.each do |n|
+    attack_order = acted.each_with_index.sort_by do |n, i|
+      sk = duel.actions[n] && BattleSkills.get(duel.actions[n][:type])
+      [(sk && [:attack_debuff, :confusion].include?(sk[:kind])) ? 0 : 1, i]
+    end.map(&:first)
+    attack_order.each do |n|
       act = duel.actions[n]
       skill = BattleSkills.get(act[:type])
       next unless skill && BattleSkills.attack?(act[:type])
 
       s = stat_of(duel, n)
       an = lab(duel, n)
+      if ctx[:invalid][n]
+        log << ''
+        log << "#{an}의 #{act[:type]} → 혼란 상태라 행동이 무효화되었습니다."
+        next
+      end
       next unless duel_gate!(duel, ctx, log, n, act[:type], skill, an)
 
       t = act[:target]
-      ts = stat_of(duel, t)
-      tn = lab(duel, t)
       sure = ctx[:sure_hit].delete(n)
       sacrifice = skill[:kind] == :sacrifice_attack
       eff_atk = s[:atk].to_i + atk_bonus[n]
+      blind_down = ctx[:blind][n].to_i >= round_no ? (s[:atk].to_i * 0.2).ceil : 0
+      eff_atk = [eff_atk - blind_down, 0].max
 
       log << ''
-      log << "#{an}의 #{act[:type]} → #{tn}"
+      log << "#{an}의 #{act[:type]} → #{lab(duel, t)}"
+      log << "#{an} [시야차단] 마법능력 -#{blind_down}" if blind_down > 0
+
+      guardian = ctx[:cover][t]
+      if guardian && guardian != n && duel.hp[guardian].to_i > 0
+        log << "#{lab(duel, guardian)} → #{lab(duel, t)} 대신 피격 (희생)"
+        t = guardian
+      end
+      ts = stat_of(duel, t)
+      tn = lab(duel, t)
 
       if sacrifice
         cost = act[:cost].to_i
@@ -319,6 +392,10 @@ class DuelManager
       end
 
       mult = skill[:multiplier].to_f
+      if rush_info[n]
+        mult = rush_info[n][:multiplier]
+        log << "습격 배율 ×#{mult}"
+      end
       scaled = (eff_atk * mult).ceil
       power = crit ? scaled * 2 : scaled
       total_dur = ts[:dur].to_i + dur_bonus[t]
@@ -334,13 +411,49 @@ class DuelManager
       end
       damage[t] += dmg
       log << "실질 피해 #{dmg}"
+
+      rev = ctx[:revenge][t]
+      if rev && dmg > 0
+        rpower = (dmg * rev[:multiplier].to_f).ceil
+        reff_dur = ((s[:dur].to_i + dur_bonus[n]) * defended[n]).to_i
+        rdmg = BattleCalculator.calc_damage(rpower, reff_dur)
+        damage[n] += rdmg
+        log << "#{lab(duel, rev[:by])}의 복수 → #{an}에게 반격 (피해 #{dmg} ×#{rev[:multiplier]} = #{rpower}, 내구도 #{reff_dur}, 실질 반격 #{rdmg})"
+      end
+
+      case skill[:kind]
+      when :attack_debuff
+        if ctx[:blind][t].to_i >= round_no
+          log << "#{tn} [시야차단] 이미 적용 중 — 추가 감소 없음"
+        else
+          ctx[:blind][t] = round_no + 1
+          log << "#{tn} [시야차단] 마법능력 -20% (이번 라운드+다음 라운드)"
+        end
+      when :confusion
+        if ctx[:confusion_immune_until][t].to_i >= round_no
+          log << "#{tn} 혼란 면역 상태입니다. (#{ctx[:confusion_immune_until][t].to_i - round_no + 1}라운드 남음)"
+        else
+          ctx[:confusion][t] += 1
+          log << "#{tn} 혼란 #{ctx[:confusion][t]}/2중첩"
+          if ctx[:confusion][t] >= 2
+            ctx[:confusion][t] = 0
+            ctx[:invalid][t] = true
+            ctx[:confusion_active][t] = round_no + 1
+            ctx[:confusion_immune_until][t] = round_no + 2
+            log << "#{tn} 혼란 2중첩 도달 — 이번 라운드 공격 무효화 (이후 2턴 면역)"
+          end
+        end
+      end
     end
 
     # 4) 체력 반영 (후플푸프2: 전투당 1회, 0 이하가 되면 건강 1로 생존)
     damage.each do |t, d|
       after = duel.hp[t].to_i - d
       ts = stat_of(duel, t)
-      if after <= 0 && d > 0 && ts[:house].to_s.strip == '후플푸프' && ts[:passive].to_s == '2' && !ctx[:guard_used][t]
+      if after <= 0 && d > 0 && ctx[:survive_once][t]
+        after = 1
+        log << "#{lab(duel, t)}: [필사즉생] 건강 0 이하 방지 — 건강 1로 생존"
+      elsif after <= 0 && d > 0 && ts[:house].to_s.strip == '후플푸프' && ts[:passive].to_s == '2' && !ctx[:guard_used][t]
         ctx[:guard_used][t] = true
         after = 1
         log << "#{lab(duel, t)}: [후플푸프] 건강 0 이하 방지 — 건강 1로 생존 (전투 중 1회)"
@@ -377,6 +490,10 @@ class DuelManager
       buffs.reject! { |b| b[:turns] && b[:turns] <= 0 }
     end
     ctx[:shields].clear unless SHIELDS_PERSIST
+    ctx[:revenge].clear
+    ctx[:cover].clear
+    ctx[:survive_once].clear
+    ctx[:invalid].clear
 
     # 6) 체력을 시트에 쓰고, 쓰러진 참가자는 전투불능 표시, 사용한 물약은 소지품에서 차감
     saved =

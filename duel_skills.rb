@@ -5,7 +5,7 @@
 # duel_battle.rb 의 handle_action 을 대체한다.
 
 class DuelManager
-  DUEL_PENDING = %w[흙뿌리기 혼란 습격 복수 희생 필사즉생 행운부여].freeze
+  DUEL_PENDING = [].freeze
 
   private
 
@@ -20,7 +20,15 @@ class DuelManager
       prev_took_damage: {},
       prev_action: {},
       slytherin_luck: Hash.new(0),
-      guard_used: {}
+      guard_used: {},
+      confusion: Hash.new(0),
+      confusion_active: {},
+      confusion_immune_until: {},
+      blind: {},
+      revenge: {},
+      cover: {},
+      survive_once: {},
+      invalid: {}
     }
   end
 
@@ -81,6 +89,54 @@ class DuelManager
     puts "[결투] [#{duel.id}] 순간이동: @#{name} #{from} → #{coord}"
   end
 
+  def duel_xy(pos)
+    m = pos.to_s.strip.upcase.match(/\A([A-G])([1-8])\z/)
+    m ? [COLS.index(m[1]), m[2].to_i - 1] : nil
+  end
+
+  def duel_steps(a, b)
+    ax, ay = duel_xy(a)
+    bx, by = duel_xy(b)
+    return 99 if ax.nil? || bx.nil?
+
+    [(ax - bx).abs, (ay - by).abs].max
+  end
+
+  def duel_straight?(a, b)
+    ax, ay = duel_xy(a)
+    bx, by = duel_xy(b)
+    return false if ax.nil? || bx.nil?
+
+    dx = bx - ax
+    dy = by - ay
+    return false if dx.zero? && dy.zero?
+
+    dx.zero? || dy.zero? || dx.abs == dy.abs
+  end
+
+  # 습격: 직선으로 돌진하되 다른 참가자가 있는 칸 직전에서 멈춘다.
+  def rush_landing(duel, name, from, dest)
+    fx, fy = duel_xy(from)
+    dx, dy = duel_xy(dest)
+    return from if fx.nil? || dx.nil?
+
+    sx = dx <=> fx
+    sy = dy <=> fy
+    blocked = alive_members(duel).reject { |n| n == name }.map { |n| duel_xy(duel.positions[n]) }
+    cx = fx
+    cy = fy
+    duel_steps(from, dest).times do
+      nx = cx + sx
+      ny = cy + sy
+      break unless (0..6).cover?(nx) && (0..7).cover?(ny)
+      break if blocked.include?([nx, ny])
+
+      cx = nx
+      cy = ny
+    end
+    "#{COLS[cx]}#{cy + 1}"
+  end
+
   def handle_action(username, text, status)
     duel = duel_of(username)
     return unless duel && duel.phase == :battle
@@ -128,7 +184,7 @@ class DuelManager
     end
 
     case skill[:kind]
-    when :attack, :area_attack, :sacrifice_attack
+    when :attack, :area_attack, :sacrifice_attack, :attack_debuff, :confusion
       target, err = pick_enemy(duel, name, parts[0])
       return reply_user(username, err, status) unless target
       return reply_user(username, out_of_range.call(target), status) if range_fail.call(target)
@@ -146,6 +202,49 @@ class DuelManager
       return reply_user(username, out_of_range.call(bad), status) if bad
 
       act[:targets] = targets
+    when :rush
+      target, err = pick_enemy(duel, name, parts[0])
+      return reply_user(username, err, status) unless target
+
+      dest = parts[1].to_s.strip.upcase
+      unless BattleGrid.valid_pos?(dest)
+        return reply_user(username, '이동할 좌표가 올바르지 않습니다. 예: [습격/상대아이디/D4]', status)
+      end
+      unless duel_straight?(pos, dest)
+        return reply_user(username, "습격은 현재 위치(#{pos})에서 가로/세로/대각선 직선상의 좌표로만 이동할 수 있습니다. 지정 좌표: #{dest}", status)
+      end
+      if duel_steps(dest, duel.positions[target]) > 1
+        return reply_user(username, "습격은 상대 바로 옆(1칸 이내)에 머무는 좌표만 지정할 수 있습니다. 지정 좌표: #{dest}", status)
+      end
+
+      act[:target] = target
+      act[:dest] = dest
+    when :revenge
+      targets, err = pick_allies(duel, name, parts[0], skill[:max_targets] || 3)
+      return reply_user(username, err, status) unless targets
+
+      bad = targets.find { |t| range_fail.call(t) }
+      return reply_user(username, out_of_range.call(bad), status) if bad
+
+      act[:targets] = targets
+    when :cover
+      targets, err = pick_allies(duel, name, parts[0], 1, default_self: false)
+      return reply_user(username, err || '희생할 대상을 지정해주세요. 예: [희생/아이디]', status) unless targets
+      return reply_user(username, '희생은 자신이 아닌 같은 팀 참가자를 지정해야 합니다.', status) if targets.first == name
+      return reply_user(username, out_of_range.call(targets.first), status) if range_fail.call(targets.first)
+
+      act[:targets] = targets
+    when :survive_once
+      act[:targets] = []
+    when :force_move
+      targets, err = pick_allies(duel, name, parts[0], 1, default_self: false)
+      return reply_user(username, err || '형식: [행운부여/아이디/좌표]', status) unless targets
+
+      coord = parts[1].to_s.strip.upcase
+      return reply_user(username, '이동 좌표가 올바르지 않습니다. 예: [행운부여/아이디/C3]', status) unless BattleGrid.valid_pos?(coord)
+
+      act[:targets] = targets
+      act[:coord] = coord
     when :cooldown_reset
       targets, err = pick_allies(duel, name, parts[0], 3, default_self: false)
       return reply_user(username, err || '형식: [즉발/대상/스킬명]', status) unless targets
