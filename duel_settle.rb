@@ -127,6 +127,16 @@ class DuelManager
       max = max_hp_of(duel, n, start_hp)
       case s[:house].to_s.strip
       when '그리핀도르'
+        if s[:passive].to_s == '1'
+          front = enemies_of(duel, n).any? do |e|
+            BattleCalculator.in_front?(duel.positions[e], duel.positions[n], (duel.facing || {})[e].to_s)
+          end
+          if front
+            b = (s[:dur].to_i * 0.5).ceil
+            dur_bonus[n] += b
+            passive_lines << "#{dn}: [그리핀도르] 적 정면 1칸 — 내구도 +#{b}"
+          end
+        end
         if s[:passive].to_s == '2' && max > 0 && hp.to_f < max * 0.4
           b = (s[:atk].to_i * 0.5).ceil
           atk_bonus[n] += b
@@ -465,6 +475,22 @@ class DuelManager
       next if start_hp[n] == duel.hp[n]
 
       log << "#{lab(duel, n)} 건강 #{start_hp[n]} → #{duel.hp[n]}"
+    end
+
+    # 5-00) 방향 갱신: 공격/습격한 대상 쪽을 바라본다 (다음 라운드 그리핀도르1 정면 판정용)
+    duel.facing ||= {}
+    acted.each do |n|
+      act = duel.actions[n]
+      t = act && act[:target]
+      next unless t
+
+      a = duel_xy(duel.positions[n])
+      b = duel_xy(duel.positions[t])
+      next if a.nil? || b.nil? || a == b
+
+      dx = b[0] - a[0]
+      dy = b[1] - a[1]
+      duel.facing[n] = dx.abs >= dy.abs ? (dx > 0 ? '우' : '좌') : (dy > 0 ? '하' : '상')
     end
 
     # 5-0) 다음 라운드 패시브용 기록: 이번 라운드 피격 여부, 행동, 슬리데린2 누적

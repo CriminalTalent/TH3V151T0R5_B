@@ -19,7 +19,7 @@ class DuelManager
     :id, :challenger, :team_a, :team_b, :accepted, :phase, :created_at,
     :prep_started_at, :positions, :reply_id, :announced_prep, :retry_after,
     :round, :stats, :hp, :cooldowns, :actions, :round_started_at, :announced_round,
-    :next_round_at, :idle_rounds, :pending_post, :finishing, :ctx,
+    :next_round_at, :idle_rounds, :pending_post, :finishing, :ctx, :facing, :bot_anchor,
     keyword_init: true
   )
 
@@ -148,8 +148,14 @@ class DuelManager
 
   def post(duel, text, reply_to = nil)
     tags = members(duel).map { |n| "@#{n}" }.join(' ')
-    response = post_battle_thread("#{tags}\n\n#{text}", true, reply_to || duel.reply_id)
-    mark_reply(duel, response['id']) if response && response['id']
+    # 첫 게시(도전 안내)만 도전자의 글에 답장하고, 이후는 봇이 올린 직전 글에 이어서 답장한다.
+    # (참가자의 DM에 답장하면 다른 참가자에게는 이어지지 않는 개별 글로 보인다)
+    anchor = duel.bot_anchor.to_s.empty? ? (reply_to || duel.reply_id) : duel.bot_anchor
+    response = post_battle_thread("#{tags}\n\n#{text}", true, anchor)
+    if response && response['id']
+      mark_reply(duel, response['id'])
+      duel.bot_anchor = response['id'].to_s
+    end
     response
   rescue => e
     puts "[결투] 게시 오류: #{e.class}: #{e.message}"
@@ -323,6 +329,11 @@ class DuelManager
       duel.hp[n] = st[:hp].to_i
     end
     duel.cooldowns = Hash.new { |h, k| h[k] = {} }
+    duel.facing = {}
+    members(duel).each do |n|
+      f = duel.stats[n][:facing].to_s.strip
+      duel.facing[n] = %w[상 하 좌 우].include?(f) ? f : '하'
+    end
     duel.actions = {}
     duel.round = 1
     duel.idle_rounds = 0
