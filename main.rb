@@ -82,6 +82,22 @@ def create_battle_session_from_status(status, content, mode, creature_sheet, bot
 
   return nil if usernames.empty?
 
+  # 결투(도전 대기 포함) 중인 참가자는 크리쳐 전투를 시작할 수 없다.
+  if defined?(DUEL_MANAGER)
+    busy_now = usernames.select { |u| DUEL_MANAGER.busy?(u) }
+    unless busy_now.empty?
+      sender_name = status.dig('account', 'username').to_s.strip
+      tag_names = ([sender_name] + busy_now).reject(&:empty?).uniq
+      begin
+        post_battle_thread("#{tag_names.map { |u| "@#{u}" }.join(' ')} 결투 중인 참가자가 있어 크리쳐 전투를 시작할 수 없습니다. 결투가 끝난 뒤 다시 시작해주세요.", true, status['id'])
+      rescue => e
+        puts "[전투봇] 결투 중 참가자 안내 실패: #{e.class}: #{e.message}"
+      end
+      puts "[전투봇] 크리쳐 전투 시작 보류: 결투 중인 참가자 #{busy_now.join(', ')}"
+      return nil
+    end
+  end
+
   creature = creature_from_start_content(content, creature_sheet)
   creature[:pos] = 'D4' if creature[:pos].to_s.strip.empty?
 

@@ -93,6 +93,12 @@ class DuelManager
     puts "[결투] tick 오류: #{e.class}: #{e.message}"
   end
 
+  # 결투(도전 대기 포함) 중인 참가자인지. 크리쳐 전투 시작 쪽에서 확인한다.
+  def busy?(username)
+    name = username.to_s.sub(/\A@/, '').split('@').first.to_s.strip
+    !name.empty? && !duel_of(name).nil?
+  end
+
   private
 
   def members(duel)
