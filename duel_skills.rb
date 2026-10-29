@@ -15,7 +15,12 @@ class DuelManager
       shields: Hash.new(0),
       sure_hit: {},
       once_used: Hash.new { |h, k| h[k] = {} },
-      potion_used: []
+      potion_used: [],
+      round: 1,
+      prev_took_damage: {},
+      prev_action: {},
+      slytherin_luck: Hash.new(0),
+      guard_used: {}
     }
   end
 

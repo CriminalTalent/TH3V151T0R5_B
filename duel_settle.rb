@@ -91,6 +91,54 @@ class DuelManager
       agi_bonus[n] += buff_bonus(ctx, n, :agi)
     end
 
+    ctx[:round] = round_no
+
+    # 기숙사 패시브 (그리핀도르1, 래번클로1은 3-3 이후)
+    passive_lines = []
+    alive.each do |n|
+      s = stat_of(duel, n)
+      dn = lab(duel, n)
+      hp = duel.hp[n].to_i
+      max = max_hp_of(duel, n, start_hp)
+      case s[:house].to_s.strip
+      when '그리핀도르'
+        if s[:passive].to_s == '2' && max > 0 && hp.to_f < max * 0.4
+          b = (s[:atk].to_i * 0.5).ceil
+          atk_bonus[n] += b
+          passive_lines << "#{dn}: [그리핀도르] 건강 40% 미만 — 마법능력 +#{b}"
+        end
+      when '슬리데린'
+        if s[:passive].to_s == '1' && round_no > 1 && !ctx[:prev_took_damage][n]
+          b = (s[:atk].to_i * 0.5).ceil
+          atk_bonus[n] += b
+          passive_lines << "#{dn}: [슬리데린] 이전 라운드 무피해 — 마법능력 +#{b}"
+        end
+        if s[:passive].to_s == '2' && ctx[:slytherin_luck][n].to_i > 0
+          luck_bonus[n] += ctx[:slytherin_luck][n]
+          passive_lines << "#{dn}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][n]}"
+        end
+      when '래번클로'
+        if s[:passive].to_s == '2'
+          prev_cat = BattleSkills.category(ctx[:prev_action][n])
+          cur_cat = BattleSkills.category(duel.actions[n] && duel.actions[n][:type])
+          if prev_cat && cur_cat && prev_cat != cur_cat
+            tec_bonus[n] += 10
+            passive_lines << "#{dn}: [래번클로] 행동 분류 변경 — 기술 +10"
+          end
+        end
+      when '후플푸프'
+        if s[:passive].to_s == '1' && ctx[:prev_took_damage][n]
+          b = (s[:dur].to_i * 0.5).ceil
+          dur_bonus[n] += b
+          passive_lines << "#{dn}: [후플푸프] 이전 라운드 피격 — 내구도 +#{b}"
+        end
+      end
+    end
+    unless passive_lines.empty?
+      log << '[기숙사 패시브]'
+      log.concat(passive_lines)
+    end
+
     in_range = ->(from, to, range) { BattleGrid.in_range?(duel.positions[from], duel.positions[to], range) }
     allies_in_range = lambda do |n, range|
       alive_members(duel).select { |r| team_of(duel, r) == team_of(duel, n) && in_range.call(n, r, range) }
@@ -288,13 +336,33 @@ class DuelManager
       log << "실질 피해 #{dmg}"
     end
 
-    # 4) 체력 반영
-    damage.each { |t, d| duel.hp[t] = [duel.hp[t].to_i - d, 0].max }
+    # 4) 체력 반영 (후플푸프2: 전투당 1회, 0 이하가 되면 건강 1로 생존)
+    damage.each do |t, d|
+      after = duel.hp[t].to_i - d
+      ts = stat_of(duel, t)
+      if after <= 0 && d > 0 && ts[:house].to_s.strip == '후플푸프' && ts[:passive].to_s == '2' && !ctx[:guard_used][t]
+        ctx[:guard_used][t] = true
+        after = 1
+        log << "#{lab(duel, t)}: [후플푸프] 건강 0 이하 방지 — 건강 1로 생존 (전투 중 1회)"
+      end
+      duel.hp[t] = [after, 0].max
+    end
     log << ''
     members(duel).each do |n|
       next if start_hp[n] == duel.hp[n]
 
       log << "#{lab(duel, n)} 건강 #{start_hp[n]} → #{duel.hp[n]}"
+    end
+
+    # 5-0) 다음 라운드 패시브용 기록: 이번 라운드 피격 여부, 행동, 슬리데린2 누적
+    ctx[:prev_took_damage] = damage.select { |_t, d| d > 0 }.keys.each_with_object({}) { |t, h| h[t] = true }
+    members(duel).each { |n| ctx[:prev_action][n] = duel.actions[n] && duel.actions[n][:type] }
+    alive.each do |n|
+      s = stat_of(duel, n)
+      next unless s[:house].to_s.strip == '슬리데린' && s[:passive].to_s == '2'
+
+      act = duel.actions[n]
+      ctx[:slytherin_luck][n] += 10 if act.nil? || act[:type] == '관찰'
     end
 
     # 5) 쿨타임과 버프 정리 (쿨타임은 사용 라운드에 N+1을 넣고 라운드 끝에 1을 뺀다)
