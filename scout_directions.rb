@@ -325,7 +325,7 @@ module ScoutDirections
     rows[1..].to_a.each do |row|
       id = row[id_col].to_s.gsub('@', '').strip
       next unless id == acct
-      return row[credit_col].to_s.strip.to_i
+      return row[credit_col].to_s.gsub(/[^\-0-9]/, '').to_i
     end
     nil
   end
@@ -346,10 +346,10 @@ module ScoutDirections
       id = row[id_col].to_s.gsub('@', '').strip
       next unless id == acct
 
-      current = row[credit_col].to_s.strip.to_i
+      current = row[credit_col].to_s.gsub(/[^\-0-9]/, '').to_i
       new_credits = current + amount.to_i
 
-      scout_sheet.write("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits]])
+      (scout_sheet.respond_to?(:write_raw) ? scout_sheet.write_raw("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits.to_s]]) : scout_sheet.write("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits.to_s]]))
       return new_credits
     end
 
@@ -373,7 +373,7 @@ module ScoutDirections
     rows[1..].to_a.each_with_index do |row, i|
       id = row[id_col].to_s.gsub('@', '').strip
       next unless id == acct
-      current = row[credit_col].to_s.strip.to_i
+      current = row[credit_col].to_s.gsub(/[^\-0-9]/, '').to_i
       cap = [max_amount.to_i, current].min
       if cap <= 0
         taken = 0
@@ -383,7 +383,7 @@ module ScoutDirections
         taken = rand(low..cap)
       end
       new_credits = current - taken
-      scout_sheet.write("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits]])
+      (scout_sheet.respond_to?(:write_raw) ? scout_sheet.write_raw("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits.to_s]]) : scout_sheet.write("'사용자'!#{column_letter(credit_col)}#{i + 2}", [[new_credits.to_s]]))
       return [taken, new_credits]
     end
     nil

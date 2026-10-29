@@ -119,6 +119,22 @@ class SheetManager
     false
   end
 
+  def write_raw(range, values)
+    body = Google::Apis::SheetsV4::ValueRange.new(values: values)
+    with_retry("쓰기(RAW) #{range}") do
+      @service.update_spreadsheet_value(
+        @sheet_id,
+        range,
+        body,
+        value_input_option: 'RAW'
+      )
+    end
+    true
+  rescue => e
+    puts "[시트 쓰기 오류] #{range}: #{e.message}"
+    false
+  end
+
   def append(range, values)
     body = Google::Apis::SheetsV4::ValueRange.new(values: [values])
     with_retry("추가 #{range}") do
