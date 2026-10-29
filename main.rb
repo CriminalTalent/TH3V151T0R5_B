@@ -1051,6 +1051,7 @@ def select_auto_skill(creature, creature_sheet, ctx = nil)
   end
 end
 
+require_relative 'duel_manager' if ENV['DUEL_ENABLED'].to_s.strip.downcase == 'true'
 fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
 snapshot_current_dm_ids(processed_dm_ids)
 snapshot_current_notification_ids(processed_notification_ids)
@@ -1084,6 +1085,7 @@ loop do
     end
 
     sessions.values.each { |session| check_prep_completion(session, creature_sheet) }
+    DUEL_MANAGER.tick(runner_sheet: runner_sheet) if defined?(DUEL_MANAGER)
 
     sessions.values.each do |session|
       next unless session.auto_next_round_timer
@@ -1170,6 +1172,13 @@ loop do
           puts "[전투봇] DM 종료 명령 무시: 연결 세션 불명확 @#{username}"
           sheet_log(creature_sheet, '-', '-', '전투 종료 명령 무시', "@#{username} / DM 연결 세션 불명확 / status=#{end_sid}")
         end
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if defined?(DUEL_MANAGER) &&
+         DUEL_MANAGER.handle_message(username: username, text: content, status: last_status,
+                                     sessions: sessions, runner_sheet: runner_sheet, bot_username: BOT_USERNAME)
         processed_dm_ids.add(dm_id)
         next
       end
@@ -1339,6 +1348,14 @@ loop do
 
       status = notification['status']
       unless status
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if defined?(DUEL_MANAGER) &&
+         DUEL_MANAGER.handle_message(username: notification.dig('account', 'username').to_s,
+                                     text: clean_html(status['content']), status: status,
+                                     sessions: sessions, runner_sheet: runner_sheet, bot_username: BOT_USERNAME)
         processed_notification_ids.add(notification_id)
         next
       end
