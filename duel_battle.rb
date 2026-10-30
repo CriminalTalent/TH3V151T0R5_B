@@ -129,6 +129,7 @@ class DuelManager
            "물약: [위겐웰드 물약/아이디] (소지품에 있을 경우)\n" \
            "입력 대기: 5분\n" \
            "───────────────────"
+    text += "\n※ 공개로 진행 중입니다. 행동은 DM으로 보내면 상대에게 보이지 않습니다." if duel.public_mode
     response = post(duel, text)
     if response && response['id'] && !response['partial']
       duel.announced_round = true

@@ -19,7 +19,7 @@ class DuelManager
     :id, :challenger, :team_a, :team_b, :accepted, :phase, :created_at,
     :prep_started_at, :positions, :reply_id, :announced_prep, :retry_after,
     :round, :stats, :hp, :cooldowns, :actions, :round_started_at, :announced_round,
-    :next_round_at, :idle_rounds, :pending_post, :finishing, :ctx, :facing, :bot_anchor,
+    :next_round_at, :idle_rounds, :pending_post, :finishing, :ctx, :facing, :bot_anchor, :public_mode,
     keyword_init: true
   )
 
@@ -151,7 +151,7 @@ class DuelManager
     # 첫 게시(도전 안내)만 도전자의 글에 답장하고, 이후는 봇이 올린 직전 글에 이어서 답장한다.
     # (참가자의 DM에 답장하면 다른 참가자에게는 이어지지 않는 개별 글로 보인다)
     anchor = duel.bot_anchor.to_s.empty? ? (reply_to || duel.reply_id) : duel.bot_anchor
-    response = post_battle_thread("#{tags}\n\n#{text}", true, anchor)
+    response = post_battle_thread("#{tags}\n\n#{text}", !duel.public_mode, anchor)
     if response && response['id']
       mark_reply(duel, response['id'])
       duel.bot_anchor = response['id'].to_s
@@ -213,7 +213,9 @@ class DuelManager
       id: status['id'].to_s, challenger: canon_names[0], team_a: team_a, team_b: team_b,
       accepted: Set.new([canon_names[0]]), phase: :pending, created_at: Time.now,
       prep_started_at: nil, positions: {}, reply_id: status['id'].to_s,
-      announced_prep: false, retry_after: nil
+      announced_prep: false, retry_after: nil,
+      public_mode: (ENV['DUEL_PUBLIC'].to_s.strip.downcase != 'false') &&
+                   %w[public unlisted].include?(status['visibility'].to_s)
     )
     @duels[duel.id] = duel
     puts "[결투] [#{duel.id}] 도전: #{team_a.join(',')} vs #{team_b.join(',')}"
@@ -302,6 +304,7 @@ class DuelManager
            "형식: [좌표]\n" \
            "입력 대기: 5분\n" \
            "───────────────────"
+    text += "\n※ 공개로 진행 중입니다. 행동과 시작 위치는 DM으로 보내면 상대에게 보이지 않습니다." if duel.public_mode
     response = post(duel, text)
     if response && response['id'] && !response['partial']
       duel.announced_prep = true
