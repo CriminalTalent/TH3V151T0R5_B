@@ -72,6 +72,17 @@ handled_battle_end_status_ids = Set.new
 sessions = {}
 last_post_time = Time.at(0)
 
+# 전투 시작 거절/오류 안내: 시작한 사람을 태그하고 그 글에 답장(스레드)으로 올린다.
+# 시작한 글이 공개/미등재가 아니면 DM으로 보낸다.
+def battle_notice(status, text)
+  who = status.dig('account', 'username').to_s.strip
+  dm = !%w[public unlisted private].include?(status['visibility'].to_s)
+  post_battle_thread("#{who.empty? ? '' : "@#{who} "}#{text}", dm, status['id'])
+rescue => e
+  puts "[전투봇] 시작 안내 게시 실패: #{e.class}: #{e.message}"
+  nil
+end
+
 def create_battle_session_from_status(status, content, mode, creature_sheet, bot_username, fallback_sender = nil)
   usernames = extract_usernames_from_status(status, content, bot_username)
   usernames = usernames.map { |u| u.to_s.gsub('@', '').strip }.reject(&:empty?).uniq
@@ -81,6 +92,15 @@ def create_battle_session_from_status(status, content, mode, creature_sheet, bot
   end
 
   return nil if usernames.empty?
+
+  # 현상금 사냥은 참여 인원이 최대 BOUNTY_MAX_RUNNERS(기본 4)명이다.
+  bounty_limit = (ENV['BOUNTY_MAX_RUNNERS'] || '4').to_i
+  if bounty_start_match(content) && bounty_limit > 0 && usernames.size > bounty_limit
+    battle_notice(status, "[현상금] 참여 인원은 최대 #{bounty_limit}명입니다. (현재 #{usernames.size}명) 인원을 줄여 다시 시도해주세요.")
+    status['__rejected'] = true
+    puts "[전투봇] 현상금 시작 거절: 인원 초과 #{usernames.size}/#{bounty_limit}"
+    return nil
+  end
 
   # 결투(도전 대기 포함) 중인 참가자는 크리쳐 전투를 시작할 수 없다.
   if defined?(DUEL_MANAGER)
@@ -94,6 +114,7 @@ def create_battle_session_from_status(status, content, mode, creature_sheet, bot
         puts "[전투봇] 결투 중 참가자 안내 실패: #{e.class}: #{e.message}"
       end
       puts "[전투봇] 크리쳐 전투 시작 보류: 결투 중인 참가자 #{busy_now.join(', ')}"
+      status['__rejected'] = true
       return nil
     end
   end
@@ -119,8 +140,10 @@ def create_battle_session_from_status(status, content, mode, creature_sheet, bot
     session.bounty_pot = nil
     session.bounty_per_person = nil
     session.instance_variable_set(:@bounty_pending_pot, bounty_match[2].to_i)
-    # 현상금 사냥은 실행 탭 설정과 무관하게 항상 DM으로 진행한다.
-    session.dm_visibility = true
+    # 현상금 사냥은 실행 탭 설정과 무관하게, 시작한 글의 공개 범위를 따른다.
+    # (DM으로 시작하면 DM, 공개 멘션으로 시작하면 공개 스레드. BOUNTY_PUBLIC=false 면 항상 DM)
+    public_start = %w[public unlisted private].include?(status['visibility'].to_s)
+    session.dm_visibility = !(public_start && ENV['BOUNTY_PUBLIC'].to_s.strip.downcase != 'false')
   end
 
   session
@@ -136,13 +159,18 @@ def apply_bounty_pot!(session, scout_sheet, creature_sheet)
   runners = session.runner_names
   today = Time.now.strftime('%Y-%m-%d')
 
-  already = runners.select { |acct| creature_sheet.bounty_participated_today?(acct, today) }
+  # 하루 참여 제한은 해제됨(2026-10-31). BOUNTY_DAILY_LIMIT=on 이면 1인 1일 1회 제한을 다시 적용한다.
+  already = if ENV['BOUNTY_DAILY_LIMIT'].to_s.strip.downcase == 'on'
+              runners.select { |acct| creature_sheet.bounty_participated_today?(acct, today) }
+            else
+              []
+            end
   unless already.empty?
     session.instance_variable_set(:@bounty_pending_pot, nil)
     return [:already_participated, already, nil]
   end
 
-  per_person = (pot.to_f / runners.size).ceil
+  per_person = (pot.to_i + runners.size - 1) / runners.size
 
   shortfalls = []
   runners.each do |acct|
@@ -1262,13 +1290,15 @@ loop do
           processed_statuses.add(status_id)
           next
         end
-        session = create_battle_session_from_status(status, content, :public, creature_sheet, BOT_USERNAME, nil)
+        starter_name = status.dig('account', 'username').to_s.strip
+        bot_mentioned = status['mentions'].to_a.any? { |m| (m['username'] || m['acct']).to_s.split('@').first.to_s.casecmp?(BOT_USERNAME.to_s) }
+        session = create_battle_session_from_status(status, content, :public, creature_sheet, BOT_USERNAME, bot_mentioned ? starter_name : nil)
         if session
           ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
           if ok == :already_participated
-            listener.post_public("[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+            battle_notice(status, "[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
           elsif ok == false
-            listener.post_public("[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+            battle_notice(status, "[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
           else
             sessions[session.id] = session
             auto_enabled = $trigger_sheet.read_auto_mode
@@ -1276,8 +1306,8 @@ loop do
             puts "[전투봇] [세션 #{session.id}] 공개 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
             sheet_log(creature_sheet, session.id, session.round, '전투 시작', "공개 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
           end
-        else
-          listener.post_public('[전투 오류] 참여자가 없습니다. 태그를 추가하세요.')
+        elsif !status['__rejected']
+          battle_notice(status, '[전투 오류] 참여자가 없습니다. 태그를 추가하세요.')
           puts '[전투봇] 태그된 러너 없음'
         end
         processed_statuses.add(status_id)
@@ -1427,9 +1457,9 @@ loop do
         if session
           ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
           if ok == :already_participated
-            listener.post_public("[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+            battle_notice(status, "[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
           elsif ok == false
-            listener.post_public("[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+            battle_notice(status, "[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
           else
             sessions[session.id] = session
             processed_statuses.add(status['id'])

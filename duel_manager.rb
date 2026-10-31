@@ -215,7 +215,7 @@ class DuelManager
       prep_started_at: nil, positions: {}, reply_id: status['id'].to_s,
       announced_prep: false, retry_after: nil,
       public_mode: (ENV['DUEL_PUBLIC'].to_s.strip.downcase != 'false') &&
-                   %w[public unlisted].include?(status['visibility'].to_s)
+                   %w[public unlisted private].include?(status['visibility'].to_s)
     )
     @duels[duel.id] = duel
     puts "[결투] [#{duel.id}] 도전: #{team_a.join(',')} vs #{team_b.join(',')}"
