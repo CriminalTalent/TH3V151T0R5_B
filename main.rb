@@ -83,6 +83,17 @@ rescue => e
   nil
 end
 
+# 캐시 초기화 글을 경로(DM/공개/멘션)와 상관없이 한 번만 처리한다.
+$cache_reset_seen = {}
+def cache_reset_once?(status_id)
+  sid = status_id.to_s
+  return false if sid.empty?
+  return false if $cache_reset_seen[sid]
+  $cache_reset_seen[sid] = true
+  $cache_reset_seen.shift while $cache_reset_seen.size > 500
+  true
+end
+
 def create_battle_session_from_status(status, content, mode, creature_sheet, bot_username, fallback_sender = nil)
   usernames = extract_usernames_from_status(status, content, bot_username)
   usernames = usernames.map { |u| u.to_s.gsub('@', '').strip }.reject(&:empty?).uniq
@@ -1159,6 +1170,10 @@ loop do
       content = clean_html(last_status['content'])
 
       if cache_reset_text?(content)
+        unless cache_reset_once?(last_status['id'])
+          processed_dm_ids.add(dm_id)
+          next
+        end
         $boss_skill_cache = nil
         puts "[전투봇] 보스스킬 캐시 초기화 (DM, @#{username})"
         post_battle_thread("@#{username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", true, last_status['id'])
@@ -1277,6 +1292,10 @@ loop do
       content = clean_html(status['content'])
 
       if cache_reset_text?(content)
+        unless cache_reset_once?(status_id)
+          processed_statuses.add(status_id)
+          next
+        end
         $boss_skill_cache = nil
         pub_username = status.dig('account', 'username').to_s
         puts "[전투봇] 보스스킬 캐시 초기화 (공개, @#{pub_username})"
@@ -1441,6 +1460,10 @@ loop do
       handled_boss_status_ids.delete(boss_sid)
 
       if cache_reset_text?(text)
+        unless cache_reset_once?(status['id'])
+          processed_notification_ids.add(notification_id)
+          next
+        end
         $boss_skill_cache = nil
         puts "[전투봇] 보스스킬 캐시 초기화 (멘션, @#{username})"
         post_battle_thread("@#{username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", false, status['id'])
