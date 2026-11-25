@@ -23,6 +23,8 @@ require_relative 'battle_round'
 require_relative 'battle_session'
 require_relative 'scout_directions'
 require_relative 'talk_lines'
+require_relative 'web_state'
+require_relative 'web_server'
 
 RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
 CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
@@ -217,6 +219,7 @@ def post_session_thread(session, text, last_post_time)
   # 매 안내가 직전 안내글에 이어서 답장으로 달리도록, 마지막으로 게시한
   # 툿 ID를 다음 안내의 답장 대상으로 갱신합니다.
   response = post_battle_thread(text, dm, session.thread_reply_id)
+  WebState.record_post(session, text) if response && response['id']
   if response && response['id']
     session.mark_thread_id(response['id'])
     session.thread_ids ||= Set.new
@@ -265,6 +268,7 @@ def announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessi
   state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
   ctx[:prep_required] = state.select { |r| r[:hp].to_i > 0 }.map { |r| r[:name].to_s }
   session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
+  WebState.update_runners(session, state)
 
   map_lines = BattleGrid.render([], session.creature)
 
@@ -629,6 +633,8 @@ def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_
   if creature_skill_def && !BattleSkills.attack?(creature[:current_skill].to_s.strip)
     boss_preview = "#{creature[:name]}이(가) #{creature[:current_skill]}을(를) 사용합니다.\n\n"
   end
+
+  WebState.update_runners(session, state)
 
   omen = creature[:omen].to_s.strip
   omen_block = omen.empty? ? '' : "#{omen}\n\n"
@@ -1017,6 +1023,7 @@ def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, 
     return [last_post_time, false]
   end
 
+  WebState.update_runners(session, runner_state)
   BattleItems.consume_all!(ctx)
 
   if ctx[:escaped_by]
@@ -1114,6 +1121,7 @@ puts '[전투봇] 기존 툿/DM/멘션 스냅샷 완료 (재발동 방지)'
 
 bot_on = false
 last_trigger_check = Time.at(0)
+WebServer.start!
 
 loop do
   begin
@@ -1140,6 +1148,7 @@ loop do
     end
 
     sessions.values.each { |session| check_prep_completion(session, creature_sheet) }
+    WebState.sync_sessions(sessions)
     DUEL_MANAGER.tick(runner_sheet: runner_sheet,
                       view_sheet: (defined?(view_sheet) ? view_sheet : nil),
                       scout_sheet: (defined?(scout_sheet) ? scout_sheet : nil)) if defined?(DUEL_MANAGER)

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>레이드 관전</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: #1b1e27; --line: #2a2f3c; --text: #e6e8ee; --muted: #8a90a0;
+    --runner: #4c8dff; --boss: #d9534f; --skill: rgba(255, 170, 0, .28); --ok: #3fb950; --dead: #555b68;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0 12px 0 0; }
+  .tabs button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; margin-right: 6px; cursor: pointer; font-size: 14px; }
+  .tabs button.on { border-color: var(--runner); }
+  .tabs button.ended { color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(320px, 520px) 1fr; gap: 20px; padding: 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .status { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+  .status .round { font-size: 22px; font-weight: 700; }
+  .status .phase { color: var(--muted); font-size: 14px; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 14px; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: 24px repeat(7, 1fr); gap: 3px; }
+  .grid .lbl { color: var(--muted); font-size: 12px; display: flex; align-items: center; justify-content: center; }
+  .cell { aspect-ratio: 1; background: #232734; border-radius: 6px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; overflow: hidden; }
+  .cell.boss { background: var(--boss); }
+  .cell.boss.head::after { content: attr(data-arrow); position: absolute; top: 2px; right: 4px; font-size: 11px; }
+  .cell.skill { box-shadow: inset 0 0 0 2px #ffaa00; background-image: linear-gradient(var(--skill), var(--skill)); }
+  .token { width: 78%; height: 78%; border-radius: 50%; background: var(--runner); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; }
+  .token.done { box-shadow: 0 0 0 3px var(--ok); }
+  .bar { height: 8px; background: #2a2f3c; border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--ok); transition: width .5s; }
+  .bar.boss > i { background: var(--boss); }
+  .unit { margin-top: 10px; }
+  .unit .row { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 4px; }
+  .unit.dead { opacity: .45; }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #2a2f3c; color: var(--muted); margin-left: 6px; }
+  .tag.ok { background: rgba(63,185,80,.2); color: var(--ok); }
+  h2 { font-size: 15px; margin: 18px 0 8px; color: var(--muted); font-weight: 600; }
+  .log { max-height: 70vh; overflow: auto; }
+  .log article { border-top: 1px solid var(--line); padding: 10px 0; white-space: pre-wrap; font-size: 13px; line-height: 1.5; }
+  .log time { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>레이드 관전</h1>
+  <div class="tabs" id="tabs"></div>
+  <span class="conn" id="conn">연결 중…</span>
+</header>
+<div id="root"><div class="empty">진행 중인 전투가 없습니다.</div></div>
+
+<script>
+const PHASE = { prep: '준비 라운드 (시작 위치 입력)', boss_command: '보스 행동 대기', announcing: '안내 중', battle: '행동 입력 중', settling: '정산 중' };
+const ARROW = { '상': '▲', '하': '▼', '좌': '◀', '우': '▶' };
+let data = null, selected = null, serverSkew = 0;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pct = (hp, max) => Math.max(0, Math.min(100, Math.round(hp / Math.max(max, 1) * 100)));
+const short = s => [...String(s)].slice(0, 2).join('');
+
+async function load() {
+  try {
+    const res = await fetch('api/battles', { cache: 'no-store' });
+    data = await res.json();
+    serverSkew = data.now - Math.floor(Date.now() / 1000);
+    document.getElementById('conn').textContent = '실시간 갱신 중';
+    render();
+  } catch (e) {
+    document.getElementById('conn').textContent = '연결 끊김, 재시도 중…';
+  }
+}
+
+function render() {
+  const battles = data.battles || [];
+  const tabs = document.getElementById('tabs');
+  const root = document.getElementById('root');
+  if (!battles.length) { tabs.innerHTML = ''; root.innerHTML = '<div class="empty">진행 중인 전투가 없습니다.</div>'; return; }
+  if (!battles.find(b => b.id === selected)) selected = battles[0].id;
+
+  tabs.innerHTML = battles.map(b =>
+    `<button class="${b.id === selected ? 'on' : ''} ${b.active ? '' : 'ended'}" data-id="${esc(b.id)}">${esc(b.creature?.name || '전투')}${b.active ? '' : ' (종료)'}</button>`
+  ).join('');
+  tabs.querySelectorAll('button').forEach(btn => btn.onclick = () => { selected = btn.dataset.id; render(); });
+
+  const b = battles.find(x => x.id === selected);
+  const c = b.creature || {};
+  const dead = new Set(b.dead || []);
+  const done = new Set(b.submitted || []);
+  const bossCells = new Set(c.cells || []);
+  const skillCells = new Set(c.skill_cells || []);
+  const byPos = {};
+  (b.runners || []).forEach(r => { if (!dead.has(r.name) && r.hp > 0 && r.pos) byPos[r.pos] = r; });
+
+  let grid = '<div class="lbl"></div>' + data.cols.map(x => `<div class="lbl">${x}</div>`).join('');
+  data.rows.forEach(y => {
+    grid += `<div class="lbl">${y}</div>`;
+    data.cols.forEach(x => {
+      const pos = x + y, r = byPos[pos];
+      const cls = ['cell', bossCells.has(pos) ? 'boss' : '', pos === c.pos ? 'head' : '', skillCells.has(pos) ? 'skill' : ''].join(' ');
+      const inner = r ? `<div class="token ${done.has(r.name) ? 'done' : ''}" title="${esc(r.display)}">${esc(short(r.display))}</div>`
+                      : (pos === c.pos ? esc(short(c.name)) : '');
+      grid += `<div class="${cls}" data-arrow="${ARROW[c.facing] || ''}" title="${pos}">${inner}</div>`;
+    });
+  });
+
+  const units = (b.runners || []).map(r => {
+    const isDead = dead.has(r.name) || r.hp <= 0;
+    const tag = isDead ? '<span class="tag">전투불능</span>' : (b.phase === 'battle' ? (done.has(r.name) ? '<span class="tag ok">제출</span>' : '<span class="tag">대기</span>') : '');
+    return `<div class="unit ${isDead ? 'dead' : ''}"><div class="row"><span>${esc(r.display)}${tag}</span><span>${r.hp} / ${r.max_hp}</span></div><div class="bar"><i style="width:${pct(r.hp, r.max_hp)}%"></i></div></div>`;
+  }).join('');
+
+  const log = (b.log || []).slice().reverse().map(l =>
+    `<article><time>${l.round}라운드 · ${new Date(l.at * 1000).toLocaleTimeString('ko-KR')}</time>${esc(l.text)}</article>`
+  ).join('') || '<div class="empty">아직 기록이 없습니다.</div>';
+
+  root.innerHTML = `
+  <main>
+    <section class="panel">
+      <div class="status">
+        <div><span class="round">${b.phase === 'prep' ? '준비' : b.round + '라운드'}</span>
+             <span class="phase">${b.active ? (PHASE[b.phase] || '') : '전투 종료'}</span></div>
+        <span class="timer" id="timer"></span>
+      </div>
+      <div class="grid">${grid}</div>
+      <div class="unit"><div class="row"><span><b>${esc(c.name)}</b>${c.skill ? `<span class="tag">${esc(c.skill)}</span>` : ''}</span><span>${c.hp} / ${c.max_hp}</span></div>
+        <div class="bar boss"><i style="width:${pct(c.hp, c.max_hp)}%"></i></div></div>
+      <h2>러너</h2>${units}
+    </section>
+    <section class="panel"><h2 style="margin-top:0">전투 기록</h2><div class="log">${log}</div></section>
+  </main>`;
+  tick();
+}
+
+function tick() {
+  const el = document.getElementById('timer');
+  if (!el || !data) return;
+  const b = (data.battles || []).find(x => x.id === selected);
+  if (!b || !b.active || b.phase !== 'battle') { el.textContent = b && b.phase === 'battle' ? '' : ''; return; }
+  const now = Math.floor(Date.now() / 1000) + serverSkew;
+  const left = Math.max(0, b.round_started_at + b.action_wait - now);
+  el.textContent = `입력 마감까지 ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} · 제출 ${(b.submitted || []).length}/${b.required}`;
+}
+
+load();
+setInterval(load, 3000);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
